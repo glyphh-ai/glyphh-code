@@ -206,27 +206,81 @@ def _top_tokens(identifiers: str, n: int = 20) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Structural query analysis
+# ---------------------------------------------------------------------------
+
+def _analyze_query(query: str, words: list[str]) -> dict:
+    """Infer query intent from structure, not domain assumptions.
+
+    Detects three intent types based on query-intrinsic signals:
+      structural — path separators, extensions, camelCase, snake_case
+      import     — relational language (import, require, depend, ...)
+      concept    — plain natural language (the common case)
+    """
+    # Path signal — structural indicators only
+    has_slash = "/" in query or "\\" in query
+    has_extension = bool(re.search(r"\.\w{2,4}$", query.strip()))
+    has_camel = bool(re.search(r"[a-z][A-Z]", query))
+    has_snake = "_" in query
+
+    is_structural = has_slash or has_extension or has_camel or has_snake
+
+    # Import signal — relational language
+    import_words = {
+        "import", "require", "depend", "use", "using",
+        "from", "package", "library", "module",
+    }
+    is_import = bool(import_words & set(words))
+
+    return {
+        "is_structural": is_structural,
+        "is_import": is_import,
+        "is_concept": not is_structural and not is_import,
+    }
+
+
+# ---------------------------------------------------------------------------
 # encode_query — NL query → concept dict
 # ---------------------------------------------------------------------------
 
 def encode_query(query: str) -> dict:
     """Convert NL query to Concept dict for file index search.
 
-    Applies same tokenization pipeline as file content so query and file
-    vectors are comparable in HDC space. Returns dict with 'name' and
-    'attributes' keys matching the encoder config roles.
+    Uses structural query analysis to route attributes:
+      structural → path + identifiers (skip imports)
+      import     → identifiers + imports (skip path)
+      concept    → identifiers + imports (skip path)
+
+    This ensures the 0.30/0.70 path/content weight split works correctly:
+    path weight only activates when the query looks like a path or identifier.
     """
     tokens = _tokenize(query)
-    words = [w for w in tokens.split() if w not in _STOP_WORDS and len(w) > 2]
+    words = [w for w in tokens.split() if w not in _STOP_WORDS and len(w) > 1]
     clean = " ".join(words)
+
+    intent = _analyze_query(query, words)
+
+    if intent["is_structural"]:
+        path_tokens = clean
+        identifiers = clean
+        imports = ""
+    elif intent["is_import"]:
+        path_tokens = ""
+        identifiers = clean
+        imports = clean
+    else:
+        path_tokens = ""
+        identifiers = clean
+        imports = clean
+
     stable_id = int(hashlib.md5(query.encode()).hexdigest()[:8], 16)
 
     return {
         "name": f"query_{stable_id:08x}",
         "attributes": {
-            "path_tokens": clean,
-            "identifiers": clean,
-            "imports": clean,
+            "path_tokens": path_tokens,
+            "identifiers": identifiers,
+            "imports": imports,
         },
     }
 
@@ -302,11 +356,18 @@ def file_to_record(file_path: str, repo_root: str = ".") -> dict | None:
     identifiers = _extract_identifiers(content)
     top_tokens = _top_tokens(identifiers)
 
+    # Use top_tokens for encoding instead of full identifiers.
+    # Full identifiers can have 200+ tokens which dilutes each token's
+    # contribution to ~1/sqrt(N) in the HDC vector. Top 20 tokens keep
+    # the density comparable to query vectors (3-5 tokens), making
+    # cosine similarity discriminative.
+    top_tokens_str = " ".join(top_tokens)
+
     return {
         "concept_text": rel_path,
         "attributes": {
             "path_tokens": path_tokens,
-            "identifiers": identifiers,
+            "identifiers": top_tokens_str,
             "imports": imports,
         },
         "metadata": {
