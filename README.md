@@ -222,7 +222,30 @@ python compile.py . --incremental
 python compile.py . --diff abc123
 ```
 
-Can be wired to a git post-commit hook for automatic index updates.
+### Post-commit hook
+
+A ready-to-use hook is included in `hooks/post-commit`. It runs
+`compile.py --incremental` in the background after every commit so the
+index stays up to date automatically.
+
+Install it in any repo you've compiled:
+
+```bash
+# Copy (one-time)
+cp /path/to/model-code/hooks/post-commit /path/to/your/repo/.git/hooks/post-commit
+
+# Or symlink (auto-updates)
+ln -sf /path/to/model-code/hooks/post-commit /path/to/your/repo/.git/hooks/post-commit
+```
+
+If `compile.py` isn't in the repo root, point the hook to it:
+
+```bash
+export GLYPHH_COMPILE_PATH=/path/to/model-code/compile.py
+```
+
+The hook runs in the background and won't slow down your commits.
+Disable temporarily with `GLYPHH_HOOK_DISABLE=1`.
 
 
 ## File support
