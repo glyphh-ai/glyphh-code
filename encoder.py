@@ -29,7 +29,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from glyphh.core.config import EncoderConfig, Layer, Role, Segment
+from glyphh.core.config import EncoderConfig, Layer, Role, Segment, TemporalConfig
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,9 @@ ENCODER_CONFIG = EncoderConfig(
     dimension=2000,
     seed=42,
     apply_weights_during_encoding=False,
-    include_temporal=False,
+    include_temporal=True,
+    temporal_config=TemporalConfig(signal_type="auto"),
+    temporal_source="auto",
     layers=[
         Layer(
             name="path",
@@ -53,6 +55,7 @@ ENCODER_CONFIG = EncoderConfig(
                             name="path_tokens",
                             similarity_weight=1.0,
                             text_encoding="bag_of_words",
+                            key_part=True,
                         ),
                     ],
                 ),

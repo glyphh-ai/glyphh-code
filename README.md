@@ -72,7 +72,8 @@ python compile.py /path/to/your/repo --dry-run
 
 ### 5. Connect Claude Code
 
-Add to Claude Code MCP config (`~/.claude/mcp.json`):
+Add to Claude Code MCP config (`~/.claude/mcp.json`), replacing `{org_id}` with
+your organization ID:
 
 ```json
 {
@@ -84,6 +85,16 @@ Add to Claude Code MCP config (`~/.claude/mcp.json`):
   }
 }
 ```
+
+To find your org ID, run `glyphh auth status` in the Glyphh shell:
+
+```bash
+glyphh
+# glyphh> auth status
+#   org_id: your-org-id-here
+```
+
+In local mode the org ID is `local-dev-org`.
 
 MCP tools are automatically available via the runtime's MCP server:
 `GET /{org_id}/code/mcp/tools` → `glyphh_search`, `glyphh_related`, `glyphh_stats`
