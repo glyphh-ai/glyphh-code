@@ -72,18 +72,10 @@ python compile.py /path/to/your/repo --dry-run
 
 ### 5. Connect Claude Code
 
-Add to Claude Code MCP config (`~/.claude/mcp.json`), replacing `{org_id}` with
-your organization ID:
+Add the MCP server using the Claude Code CLI:
 
-```json
-{
-  "mcpServers": {
-    "glyphh": {
-      "url": "http://localhost:8002/{org_id}/code/mcp",
-      "transport": "http"
-    }
-  }
-}
+```bash
+claude mcp add --transport http glyphh-code http://localhost:8002/{org_id}/code/mcp
 ```
 
 To find your org ID, run `glyphh auth status` in the Glyphh shell:
@@ -94,13 +86,17 @@ glyphh
 #   org_id: your-org-id-here
 ```
 
-In local mode the org ID is `local-dev-org`.
+In local mode the org ID is `local-dev-org`:
 
-MCP tools are automatically available via the runtime's MCP server:
-`GET /{org_id}/code/mcp/tools` → `glyphh_search`, `glyphh_related`, `glyphh_stats`
+```bash
+claude mcp add --transport http glyphh-code http://localhost:8002/local-dev-org/code/mcp
+```
 
 Restart Claude Code to pick up the MCP config. In VS Code: `Cmd+Shift+P` →
 "Claude Code: Restart". In the CLI: exit and re-enter the session.
+
+Verify the connection with `/mcp` — you should see `glyphh_search`,
+`glyphh_related`, and `glyphh_stats` listed as available tools.
 
 ### 6. Add CLAUDE.md (recommended)
 
