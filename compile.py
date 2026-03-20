@@ -39,6 +39,59 @@ DEFAULT_ORG_ID = "local-dev-org"
 DEFAULT_MODEL_ID = "code"
 BATCH_SIZE = 50
 
+GLYPHH_CONFIG_FILE = Path.home() / ".glyphh" / "config.json"
+
+
+def _load_cli_config() -> dict:
+    """Load the Glyphh CLI config (~/.glyphh/config.json)."""
+    if GLYPHH_CONFIG_FILE.exists():
+        try:
+            return json.loads(GLYPHH_CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _resolve_token(explicit: str | None, runtime_url: str) -> str | None:
+    """Return the auth token to use.
+
+    Priority: explicit --token / GLYPHH_TOKEN → CLI session token.
+    Only reads the CLI session for remote (non-localhost) URLs.
+    """
+    if explicit:
+        return explicit
+    from urllib.parse import urlparse
+    host = urlparse(runtime_url).hostname
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return None
+    config = _load_cli_config()
+    token = config.get("access_token")
+    if token:
+        print("Using token from Glyphh CLI session (~/.glyphh/config.json)")
+    else:
+        print("Warning: no --token provided and no CLI session found. Run: glyphh auth login")
+    return token
+
+
+def _resolve_org_id(explicit: str, runtime_url: str) -> str:
+    """Return the org ID to use.
+
+    Priority: explicit --org-id / GLYPHH_ORG_ID → CLI session org_id.
+    Falls back to DEFAULT_ORG_ID for localhost.
+    """
+    if explicit != DEFAULT_ORG_ID:
+        return explicit
+    from urllib.parse import urlparse
+    host = urlparse(runtime_url).hostname
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return DEFAULT_ORG_ID
+    config = _load_cli_config()
+    org_id = config.get("user", {}).get("org_id")
+    if org_id:
+        print(f"Using org_id from CLI session: {org_id}")
+        return org_id
+    return DEFAULT_ORG_ID
+
 
 def walk_repo(root: str) -> list[str]:
     """Walk a repo directory and return all indexable file paths."""
@@ -220,12 +273,15 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    token = _resolve_token(args.token, args.runtime_url)
+    org_id = _resolve_org_id(args.org_id, args.runtime_url)
+
     compile_repo(
         repo_root=args.repo,
         runtime_url=args.runtime_url,
-        org_id=args.org_id,
+        org_id=org_id,
         model_id=args.model_id,
-        token=args.token,
+        token=token,
         incremental=args.incremental,
         diff=args.diff,
         dry_run=args.dry_run,

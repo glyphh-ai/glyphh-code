@@ -237,6 +237,41 @@ Skips: `.git`, `node_modules`, `__pycache__`, `dist`, `build`, `vendor`,
 Max file size: 500 KB. Binary files auto-skipped.
 
 
+## Disable MCP permission prompts
+
+By default Claude Code prompts for permission each time it calls an MCP tool.
+To allow Glyphh tools silently, add them to `.claude/settings.json` in your
+project:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__glyphh-code__glyphh_search",
+      "mcp__glyphh-code__glyphh_related",
+      "mcp__glyphh-code__glyphh_drift",
+      "mcp__glyphh-code__glyphh_risk"
+    ]
+  }
+}
+```
+
+Or use a wildcard to allow all tools from the Glyphh server:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__glyphh-code__*"
+    ]
+  }
+}
+```
+
+The first matching rule wins — Glyphh tools run silently while everything else
+still prompts.
+
+
 ## Tests
 
 ```bash
