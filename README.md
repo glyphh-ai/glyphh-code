@@ -222,30 +222,10 @@ python compile.py . --incremental
 python compile.py . --diff abc123
 ```
 
-### Post-commit hook
-
-A ready-to-use hook is included in `hooks/post-commit`. It runs
-`compile.py --incremental` in the background after every commit so the
-index stays up to date automatically.
-
-Install it in any repo you've compiled:
-
-```bash
-# Copy (one-time)
-cp /path/to/model-code/hooks/post-commit /path/to/your/repo/.git/hooks/post-commit
-
-# Or symlink (auto-updates)
-ln -sf /path/to/model-code/hooks/post-commit /path/to/your/repo/.git/hooks/post-commit
-```
-
-If `compile.py` isn't in the repo root, point the hook to it:
-
-```bash
-export GLYPHH_COMPILE_PATH=/path/to/model-code/compile.py
-```
-
-The hook runs in the background and won't slow down your commits.
-Disable temporarily with `GLYPHH_HOOK_DISABLE=1`.
+The index is updated automatically after every commit via the Claude Code
+PostToolUse hook (see [Claude Code hooks](#claude-code-hooks) below).
+For non-Claude workflows, a git post-commit hook is included at
+`hooks/post-commit`.
 
 
 ## File support
@@ -295,16 +275,16 @@ The first matching rule wins — Glyphh tools run silently while everything else
 still prompts.
 
 
-## Enforce glyphh_search over Grep/Glob
+## Claude Code hooks
 
-Claude Code defaults to using Grep and Glob for file search — bypassing the
-Glyphh index entirely. The included CLAUDE.md rules tell Claude to use
-`glyphh_search` first, but Claude doesn't always follow them.
+Two hooks are included to integrate Glyphh with Claude Code:
 
-A Claude Code **PreToolUse hook** can enforce this by blocking Grep and Glob
-calls with a message redirecting Claude to `glyphh_search`.
+1. **enforce-glyphh-search.sh** (PreToolUse) — blocks Grep and Glob calls,
+   redirecting Claude to `glyphh_search` instead
+2. **post-commit-compile.sh** (PostToolUse) — runs `compile.py --incremental`
+   after every `git commit` to keep the index up to date
 
-Add this to `.claude/settings.json` in your project:
+Add both to `.claude/settings.json` in your project:
 
 ```json
 {
@@ -319,6 +299,17 @@ Add this to `.claude/settings.json` in your project:
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/model-code/hooks/post-commit-compile.sh"
+          }
+        ]
+      }
     ]
   }
 }
@@ -326,12 +317,13 @@ Add this to `.claude/settings.json` in your project:
 
 Replace `/path/to/model-code` with wherever you cloned this repo.
 
-When Claude tries to call Grep or Glob, the hook blocks the call and tells
-Claude to use `glyphh_search` instead. Claude will then retry with the
-Glyphh index.
+Set `GLYPHH_COMPILE_PATH` if `compile.py` isn't in the repo root:
 
-To temporarily disable the hook, remove or comment out the `PreToolUse`
-entry in settings.json.
+```bash
+export GLYPHH_COMPILE_PATH=/path/to/model-code/compile.py
+```
+
+Disable either hook temporarily with `GLYPHH_HOOK_DISABLE=1`.
 
 
 ## Tests

@@ -47,8 +47,8 @@ Before editing any file:
   2. Review top_tokens and imports of related files
 
 After editing:
-  The post-commit hook (hooks/post-commit) runs compile.py --incremental
-  in the background after every commit to update the index automatically.
+  A Claude Code PostToolUse hook runs compile.py --incremental in the
+  background after every git commit to update the index automatically.
   No manual recompile needed.
 
 
