@@ -10,3 +10,4 @@ encoder:
 similarity:
   threshold: 0.45
   top_k: 5
+  store_hierarchical_vectors: true

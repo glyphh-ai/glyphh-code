@@ -14,9 +14,9 @@ Architecture:
     Content layer (0.70): identifiers (1.0) + imports (0.8) as BoW
     Dimension: 2000 (pgvector HNSW compatible)
 
-    At compile time: walk repo, tokenize each file, POST records to runtime
-    At query time: same two-layer encoding applied to NL query text,
-    cosine similarity against file index returns ranked file list.
+    Hierarchical vector storage: per-layer cortex vectors stored in
+    glyph_vectors table. Search queries the appropriate layer based on
+    structural query analysis, then re-ranks with layer-weighted scoring.
 
     Confidence gate: threshold + gap analysis. Below threshold returns ASK
     with candidates, never silent wrong routing.
@@ -39,7 +39,7 @@ from glyphh.core.config import EncoderConfig, Layer, Role, Segment, TemporalConf
 ENCODER_CONFIG = EncoderConfig(
     dimension=2000,
     seed=42,
-    apply_weights_during_encoding=False,
+    apply_weights_during_encoding=True,
     include_temporal=True,
     temporal_config=TemporalConfig(signal_type="auto"),
     temporal_source="auto",
@@ -84,6 +84,15 @@ ENCODER_CONFIG = EncoderConfig(
         ),
     ],
 )
+
+# Opt into hierarchical vector storage so per-layer cortex vectors
+# are stored in the glyph_vectors table. This is read by the runtime
+# listener from encoder_config._similarity_config in the DB.
+ENCODER_CONFIG_EXTRA = {
+    "_similarity_config": {
+        "store_hierarchical_vectors": True,
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +139,10 @@ _STOP_WORDS = frozenset({
     "public", "private", "protected", "static", "void",
     "int", "str", "bool", "float", "string", "type",
 })
+
+# Layer weights for scoring — must match ENCODER_CONFIG
+_PATH_WEIGHT = 0.30
+_CONTENT_WEIGHT = 0.70
 
 
 # ---------------------------------------------------------------------------
@@ -496,17 +509,24 @@ def _mcp_json(data: dict, is_error: bool = False) -> dict:
     }
 
 
-async def _pgvector_search(
+# ---------------------------------------------------------------------------
+# Layer-level pgvector search
+# ---------------------------------------------------------------------------
+
+async def _layer_search(
     session_factory: Any,
     org_id: str,
     model_id: str,
     query_vector,
+    layer_path: str,
     top_k: int = 5,
-    exclude_key: str | None = None,
+    exclude_glyph_id: str | None = None,
 ) -> list[dict]:
-    """Run cosine similarity search against pgvector.
+    """Search glyph_vectors table for a specific layer.
 
-    Returns list of dicts with concept_text, metadata, score.
+    Queries the hierarchical vector storage by layer path (e.g., "content",
+    "path") and returns matching glyph IDs with scores. Joins back to the
+    glyphs table for concept_text and metadata.
     """
     import numpy as np
     from sqlalchemy import text
@@ -514,26 +534,30 @@ async def _pgvector_search(
     vec = np.asarray(query_vector, dtype=float)
     vec_str = "[" + ",".join(f"{v:.1f}" for v in vec) + "]"
 
-    where = "org_id = :org_id AND model_id = :model_id"
+    exclude_clause = ""
     params: dict[str, Any] = {
         "org_id": org_id,
         "model_id": model_id,
         "vec": vec_str,
+        "layer_path": layer_path,
         "top_k": top_k,
     }
 
-    if exclude_key:
-        where += " AND concept_text != :exclude_key"
-        params["exclude_key"] = exclude_key
+    if exclude_glyph_id:
+        exclude_clause = "AND gv.glyph_id != CAST(:exclude_glyph_id AS uuid)"
+        params["exclude_glyph_id"] = exclude_glyph_id
 
     async with session_factory() as session:
         result = await session.execute(
             text(
-                f"SELECT concept_text, metadata, "
-                f"1 - (embedding <=> CAST(:vec AS vector)) AS score "
-                f"FROM glyphs "
-                f"WHERE {where} "
-                f"ORDER BY embedding <=> CAST(:vec AS vector) "
+                f"SELECT g.id AS glyph_id, g.concept_text, g.metadata, "
+                f"1 - (gv.embedding <=> CAST(:vec AS vector)) AS score "
+                f"FROM glyph_vectors gv "
+                f"JOIN glyphs g ON gv.glyph_id = g.id "
+                f"WHERE gv.org_id = :org_id AND gv.model_id = :model_id "
+                f"AND gv.level = 'layer' AND gv.path = :layer_path "
+                f"{exclude_clause} "
+                f"ORDER BY gv.embedding <=> CAST(:vec AS vector) "
                 f"LIMIT :top_k"
             ),
             params,
@@ -544,6 +568,7 @@ async def _pgvector_search(
     for row in rows:
         meta = row.metadata if isinstance(row.metadata, dict) else {}
         results.append({
+            "glyph_id": str(row.glyph_id),
             "concept_text": row.concept_text,
             "metadata": meta,
             "score": float(row.score),
@@ -551,15 +576,106 @@ async def _pgvector_search(
     return results
 
 
+async def _rerank_with_layers(
+    session_factory: Any,
+    org_id: str,
+    model_id: str,
+    query_glyph,
+    candidate_glyph_ids: list[str],
+) -> list[dict]:
+    """Re-rank candidates using layer-weighted scoring.
+
+    For each candidate, loads its per-layer vectors from glyph_vectors
+    and computes weighted similarity: 0.30 * path_sim + 0.70 * content_sim.
+    """
+    from glyphh.core.ops import cosine_similarity
+    from sqlalchemy import text
+
+    if not candidate_glyph_ids:
+        return []
+
+    # Get query layer cortexes
+    query_path_cortex = None
+    query_content_cortex = None
+    if hasattr(query_glyph, "layers"):
+        if "path" in query_glyph.layers:
+            query_path_cortex = query_glyph.layers["path"].cortex
+        if "content" in query_glyph.layers:
+            query_content_cortex = query_glyph.layers["content"].cortex
+
+    # Load candidate layer vectors
+    id_list = ",".join(f"'{gid}'" for gid in candidate_glyph_ids)
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                f"SELECT gv.glyph_id, gv.path, gv.embedding, "
+                f"g.concept_text, g.metadata "
+                f"FROM glyph_vectors gv "
+                f"JOIN glyphs g ON gv.glyph_id = g.id "
+                f"WHERE gv.org_id = :org_id AND gv.model_id = :model_id "
+                f"AND gv.level = 'layer' "
+                f"AND gv.glyph_id IN ({id_list})"
+            ),
+            {"org_id": org_id, "model_id": model_id},
+        )
+        rows = result.fetchall()
+
+    # Group by glyph_id
+    candidates: dict[str, dict] = {}
+    for row in rows:
+        gid = str(row.glyph_id)
+        if gid not in candidates:
+            meta = row.metadata if isinstance(row.metadata, dict) else {}
+            candidates[gid] = {
+                "concept_text": row.concept_text,
+                "metadata": meta,
+                "layers": {},
+            }
+        candidates[gid]["layers"][row.path] = row.embedding
+
+    # Score each candidate with layer-weighted similarity
+    scored = []
+    for gid, cand in candidates.items():
+        path_sim = 0.0
+        content_sim = 0.0
+
+        if query_path_cortex is not None and "path" in cand["layers"]:
+            path_sim = float(cosine_similarity(
+                query_path_cortex.data, cand["layers"]["path"]
+            ))
+
+        if query_content_cortex is not None and "content" in cand["layers"]:
+            content_sim = float(cosine_similarity(
+                query_content_cortex.data, cand["layers"]["content"]
+            ))
+
+        score = _PATH_WEIGHT * path_sim + _CONTENT_WEIGHT * content_sim
+
+        scored.append({
+            "glyph_id": gid,
+            "concept_text": cand["concept_text"],
+            "metadata": cand["metadata"],
+            "score": score,
+            "path_sim": path_sim,
+            "content_sim": content_sim,
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
+# ---------------------------------------------------------------------------
+# Result formatting
+# ---------------------------------------------------------------------------
+
 def _format_match(row: dict) -> dict:
-    """Format a pgvector result row into a search match.
+    """Format a search result into a match dict.
 
     The runtime stores the full record as glyph metadata. When records
     are sent in hierarchical format, the model's metadata dict is nested
     under the 'metadata' key. Handle both flat and nested layouts.
     """
     meta = row.get("metadata", {})
-    # The model's metadata may be nested under 'metadata' key
     inner = meta.get("metadata", {}) if isinstance(meta.get("metadata"), dict) else {}
     return {
         "file": inner.get("file_path") or meta.get("file_path") or row["concept_text"],
@@ -570,8 +686,20 @@ def _format_match(row: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Search handler — layer-aware
+# ---------------------------------------------------------------------------
+
 async def _handle_search(arguments: dict, context: dict) -> dict:
-    """Find files by NL query with confidence gating."""
+    """Find files by NL query using layer-level similarity.
+
+    Strategy:
+    1. Analyze query intent (structural, import, concept)
+    2. Search the primary layer via glyph_vectors (content for concept
+       queries, path for structural queries)
+    3. Re-rank top candidates with full layer-weighted scoring
+    4. Apply confidence gate (threshold + gap analysis)
+    """
     from glyphh.core.types import Concept
 
     query = arguments.get("query", "")
@@ -584,29 +712,64 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
     encoder = context["encoder"]
     encode_fn = context["encode_query_fn"]
 
-    # Encode query
+    # Encode query into a full glyph with layer cortexes
     concept_dict = encode_fn(query)
     attrs = concept_dict.get("attributes", concept_dict)
     name = concept_dict.get("name", "query")
     concept = Concept(name=name, attributes=attrs)
     query_glyph = encoder.encode(concept)
 
-    # Search pgvector
-    rows = await _pgvector_search(
+    # Determine which layer to search based on query intent
+    tokens = _tokenize(query)
+    words = [w for w in tokens.split() if w not in _STOP_WORDS and len(w) > 1]
+    intent = _analyze_query(query, words)
+
+    if intent["is_structural"] and hasattr(query_glyph, "layers") and "path" in query_glyph.layers:
+        primary_layer = "path"
+        primary_cortex = query_glyph.layers["path"].cortex
+    else:
+        primary_layer = "content"
+        primary_cortex = (
+            query_glyph.layers["content"].cortex
+            if hasattr(query_glyph, "layers") and "content" in query_glyph.layers
+            else query_glyph.global_cortex
+        )
+
+    # Phase 1: coarse retrieval from the primary layer
+    # Fetch extra candidates for re-ranking
+    coarse_k = max(top_k * 4, 20)
+    coarse_results = await _layer_search(
         context["session_factory"],
         org_id,
         model_id,
-        query_glyph.global_cortex.data,
-        top_k=top_k,
+        primary_cortex.data,
+        primary_layer,
+        top_k=coarse_k,
     )
 
-    if not rows:
+    if not coarse_results:
         return _mcp_json({
             "state": "ASK",
             "message": "No files indexed. Run: glyphh-code compile .",
         })
 
-    matches = [_format_match(r) for r in rows]
+    # Phase 2: re-rank with layer-weighted scoring
+    candidate_ids = [r["glyph_id"] for r in coarse_results]
+    ranked = await _rerank_with_layers(
+        context["session_factory"],
+        org_id,
+        model_id,
+        query_glyph,
+        candidate_ids,
+    )
+
+    if not ranked:
+        return _mcp_json({
+            "state": "ASK",
+            "message": "Encoding error during re-ranking.",
+        })
+
+    matches = [_format_match(r) for r in ranked[:top_k]]
     top_score = matches[0]["confidence"]
     gap = top_score - matches[1]["confidence"] if len(matches) > 1 else 1.0
 
@@ -623,8 +786,16 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
     })
 
 
+# ---------------------------------------------------------------------------
+# Related handler — layer-aware
+# ---------------------------------------------------------------------------
+
 async def _handle_related(arguments: dict, context: dict) -> dict:
-    """Find files semantically related to a given file."""
+    """Find files semantically related to a given file.
+
+    Uses the content layer for similarity (files related by what they do,
+    not where they are in the tree).
+    """
     from sqlalchemy import text as sql_text
 
     file_path = arguments.get("file_path", "")
@@ -635,41 +806,60 @@ async def _handle_related(arguments: dict, context: dict) -> dict:
     org_id = context["org_id"]
     model_id = context["model_id"]
 
-    # Get the file's stored vector.
-    # concept_text may be a mangled key_part value (tokenized path with
-    # underscores) so also search metadata->>'file_path' for the real path.
+    # Find the glyph by file path (concept_text or metadata)
     async with context["session_factory"]() as session:
         result = await session.execute(
             sql_text(
-                "SELECT concept_text, embedding, metadata FROM glyphs "
-                "WHERE org_id = :org_id AND model_id = :model_id "
-                "AND (concept_text = :file_path "
-                "     OR metadata->'metadata'->>'file_path' = :file_path) "
+                "SELECT g.id, g.concept_text, g.metadata "
+                "FROM glyphs g "
+                "WHERE g.org_id = :org_id AND g.model_id = :model_id "
+                "AND (g.concept_text = :file_path "
+                "     OR g.metadata->'metadata'->>'file_path' = :file_path) "
                 "LIMIT 1"
             ),
             {"org_id": org_id, "model_id": model_id, "file_path": file_path},
         )
-        row = result.fetchone()
+        glyph_row = result.fetchone()
 
-    if row is None:
+    if glyph_row is None:
         return _mcp_json({
             "state": "ASK",
             "message": f"File not in index: {file_path}. Run: glyphh-code compile .",
         })
 
-    # Search for similar files, excluding the source file
-    stored_key = row.concept_text
-    rows = await _pgvector_search(
+    glyph_id = str(glyph_row.id)
+
+    # Get the content layer vector for this file
+    async with context["session_factory"]() as session:
+        result = await session.execute(
+            sql_text(
+                "SELECT embedding FROM glyph_vectors "
+                "WHERE glyph_id = CAST(:glyph_id AS uuid) "
+                "AND level = 'layer' AND path = 'content'"
+            ),
+            {"glyph_id": glyph_id},
+        )
+        content_row = result.fetchone()
+
+    if content_row is None:
+        return _mcp_json({
+            "state": "ASK",
+            "message": f"No content vector for: {file_path}. Re-compile with hierarchical storage.",
+        })
+
+    # Search for similar files by content layer
+    results = await _layer_search(
         context["session_factory"],
         org_id,
         model_id,
-        row.embedding,
+        content_row.embedding,
+        "content",
         top_k=top_k + 1,
-        exclude_key=stored_key,
+        exclude_glyph_id=glyph_id,
     )
 
-    related = [_format_match(r) for r in rows[:top_k]]
-    source_meta = row.metadata if isinstance(row.metadata, dict) else {}
+    related = [_format_match(r) for r in results[:top_k]]
+    source_meta = glyph_row.metadata if isinstance(glyph_row.metadata, dict) else {}
     source_inner = source_meta.get("metadata", {}) if isinstance(source_meta.get("metadata"), dict) else {}
 
     return _mcp_json({
@@ -680,6 +870,10 @@ async def _handle_related(arguments: dict, context: dict) -> dict:
         "related": related,
     })
 
+
+# ---------------------------------------------------------------------------
+# Stats handler
+# ---------------------------------------------------------------------------
 
 async def _handle_stats(arguments: dict, context: dict) -> dict:
     """Return index statistics."""
@@ -699,13 +893,23 @@ async def _handle_stats(arguments: dict, context: dict) -> dict:
         )
         total_count = total.scalar() or 0
 
+        # Hierarchical vectors
+        vectors = await session.execute(
+            sql_text(
+                "SELECT COUNT(*) AS cnt FROM glyph_vectors "
+                "WHERE org_id = :org_id AND model_id = :model_id"
+            ),
+            {"org_id": org_id, "model_id": model_id},
+        )
+        vector_count = vectors.scalar() or 0
+
         # Extension breakdown
         ext_result = await session.execute(
             sql_text(
-                "SELECT metadata->>'extension' AS ext, COUNT(*) AS cnt "
+                "SELECT metadata->'metadata'->>'extension' AS ext, COUNT(*) AS cnt "
                 "FROM glyphs "
                 "WHERE org_id = :org_id AND model_id = :model_id "
-                "GROUP BY metadata->>'extension' "
+                "GROUP BY metadata->'metadata'->>'extension' "
                 "ORDER BY cnt DESC"
             ),
             {"org_id": org_id, "model_id": model_id},
@@ -715,6 +919,7 @@ async def _handle_stats(arguments: dict, context: dict) -> dict:
     return _mcp_json({
         "state": "DONE",
         "total_files": total_count,
+        "hierarchical_vectors": vector_count,
         "extensions": extensions,
         "model_id": model_id,
     })
