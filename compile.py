@@ -55,7 +55,8 @@ def _load_cli_config() -> dict:
 def _resolve_token(explicit: str | None, runtime_url: str) -> str | None:
     """Return the auth token to use.
 
-    Priority: explicit --token / GLYPHH_TOKEN → CLI session token.
+    Priority: explicit --token / GLYPHH_TOKEN →
+              runtime_tokens[endpoint] → runtime_token → access_token.
     Only reads the CLI session for remote (non-localhost) URLs.
     """
     if explicit:
@@ -65,12 +66,29 @@ def _resolve_token(explicit: str | None, runtime_url: str) -> str | None:
     if host in ("localhost", "127.0.0.1", "::1"):
         return None
     config = _load_cli_config()
-    token = config.get("access_token")
-    if token:
-        print("Using token from Glyphh CLI session (~/.glyphh/config.json)")
-    else:
-        print("Warning: no --token provided and no CLI session found. Run: glyphh auth login")
-    return token
+
+    # Per-endpoint token (matches CLI's resolve_runtime_token priority)
+    runtime_tokens = config.get("runtime_tokens", {})
+    if isinstance(runtime_tokens, dict):
+        endpoint_token = runtime_tokens.get(runtime_url, "").strip()
+        if endpoint_token:
+            print(f"Using token from CLI session (runtime_tokens[{runtime_url}])")
+            return endpoint_token
+
+    # Legacy singular runtime_token
+    runtime_token = config.get("runtime_token", "").strip()
+    if runtime_token:
+        print("Using token from CLI session (runtime_token)")
+        return runtime_token
+
+    # Platform JWT (access_token) — runtime accepts both
+    access_token = config.get("access_token", "").strip()
+    if access_token:
+        print("Using token from CLI session (access_token)")
+        return access_token
+
+    print("Warning: no --token provided and no CLI session found. Run: glyphh auth login")
+    return None
 
 
 def _resolve_org_id(explicit: str, runtime_url: str) -> str:
