@@ -156,10 +156,21 @@ def compile_repo(
         print("Nothing to index.")
         return 0
 
+    # Flatten records: listener expects flat role keys, not nested attributes
+    flat_records = []
+    for r in records:
+        flat = {}
+        if "attributes" in r:
+            flat.update(r["attributes"])
+        flat["concept_text"] = r.get("concept_text", "")
+        if "metadata" in r:
+            flat["metadata"] = r["metadata"]
+        flat_records.append(flat)
+
     # Post to runtime in batches
     start = time.time()
-    for i in range(0, len(records), BATCH_SIZE):
-        batch = records[i : i + BATCH_SIZE]
+    for i in range(0, len(flat_records), BATCH_SIZE):
+        batch = flat_records[i : i + BATCH_SIZE]
         result = post_to_listener(batch, runtime_url, org_id, model_id, token)
         job_id = result.get("job_id", "?")
         print(f"  Batch {i // BATCH_SIZE + 1}: {len(batch)} records → job {job_id}")
