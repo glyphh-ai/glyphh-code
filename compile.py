@@ -181,9 +181,16 @@ def compile_repo(
     token: str | None = None,
     incremental: bool = False,
     diff: str | None = None,
+    diff_repo: str | None = None,
     dry_run: bool = False,
 ) -> int:
-    """Compile a repository into the Glyphh code index."""
+    """Compile a repository into the Glyphh code index.
+
+    Args:
+        diff_repo: When set, run git diff in this repo instead of repo_root.
+                   Changed file paths are remapped to repo_root-relative paths.
+                   Used when a commit lands in a child repo / submodule.
+    """
     repo_root = os.path.abspath(repo_root)
     if not os.path.isdir(repo_root):
         print(f"Error: {repo_root} is not a directory")
@@ -196,8 +203,25 @@ def compile_repo(
         files = get_changed_files(repo_root, diff)
         print(f"Mode: diff {diff} ({len(files)} changed files)")
     elif incremental:
-        files = get_changed_files(repo_root, "HEAD")
-        print(f"Mode: incremental ({len(files)} changed files)")
+        # If diff_repo is set, diff there and remap paths to repo_root
+        diff_dir = os.path.abspath(diff_repo) if diff_repo else repo_root
+        files = get_changed_files(diff_dir, "HEAD")
+        if diff_repo and diff_dir != repo_root:
+            # Remap: files are absolute under diff_dir, which is a subdir of repo_root
+            remapped = []
+            for f in files:
+                if os.path.exists(f):
+                    remapped.append(f)
+                else:
+                    # Try relative to diff_dir, then map into repo_root
+                    rel = os.path.relpath(f, diff_dir)
+                    full = os.path.join(diff_dir, rel)
+                    if os.path.exists(full):
+                        remapped.append(full)
+            files = remapped
+            print(f"Mode: incremental via {diff_dir} ({len(files)} changed files)")
+        else:
+            print(f"Mode: incremental ({len(files)} changed files)")
     else:
         files = walk_repo(repo_root)
         print(f"Mode: full ({len(files)} candidate files)")
@@ -288,6 +312,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--incremental", action="store_true")
     parser.add_argument("--diff", type=str, help="Compile changes from a specific commit")
+    parser.add_argument("--diff-repo", type=str, help="Git repo to diff (when commit is in a child repo/submodule)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -302,5 +327,6 @@ if __name__ == "__main__":
         token=token,
         incremental=args.incremental,
         diff=args.diff,
+        diff_repo=args.diff_repo,
         dry_run=args.dry_run,
     )
