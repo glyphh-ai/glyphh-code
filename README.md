@@ -12,6 +12,13 @@ Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs
 
 ---
 
+> **WORK IN PROGRESS** — This model is under active development. Benchmarks
+> show Glyphh uses **20% fewer tokens and 22% fewer turns** than bare Claude
+> Code, with equal search accuracy (13/15). Overall accuracy is 76% vs 84%
+> due to MCP startup latency causing timeouts — not an HDC issue. See
+> [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for full results and
+> analysis.
+
 ## Getting Started
 
 ### 1. Install the Glyphh CLI
