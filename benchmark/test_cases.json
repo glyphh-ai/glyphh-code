@@ -1,7 +1,7 @@
 {
   "description": "Code search benchmark for fastmcp codebase (~760 files). Tests Claude's ability to find the right file and act on it with and without Glyphh.",
-  "runtime_url": "https://runtime.glyphh.ai",
-  "org_id": "a9f94516-3cb1-4218-a3f5-8aaed04e64f3",
+  "runtime_url": "http://localhost:8002",
+  "org_id": "local-dev-org",
   "model_id": "code",
   "test_cases": [
     {

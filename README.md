@@ -19,116 +19,83 @@ Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs
 > [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for full results and
 > analysis.
 
-## Getting Started
+## Quick Start
 
-### 1. Install the Glyphh CLI
-
-```bash
-# Create and activate a virtual environment (recommended)
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# Install with runtime dependencies (includes FastAPI, SQLAlchemy, pgvector)
-pip install 'glyphh[runtime]'
-```
-
-### 2. Clone and start the model
-
-This model requires PostgreSQL + pgvector for similarity search.
+One install, one command. No Docker, no PostgreSQL, no auth required.
 
 ```bash
-git clone https://github.com/glyphh-ai/model-code.git
-cd model-code
-
-# Start the Glyphh shell (prompts login on first run)
-glyphh
-
-# Inside the shell:
-# glyphh> docker init       # generates docker-compose.yml + init.sql
-# glyphh> exit
-
-# Start PostgreSQL + pgvector and the Glyphh runtime
-docker compose up -d --wait
+pip install glyphh-code
 ```
 
-This starts:
-- **PostgreSQL 16 + pgvector** on port 5432 (with HNSW indexing)
-- **Glyphh Runtime** on port 8002
+This installs the Glyphh runtime, CLI, and the Code model as a single package.
 
-Swagger docs available at `http://localhost:8002/docs` in local mode.
-
-### 3. Deploy the model
+Then from your project root:
 
 ```bash
-glyphh
-# glyphh> model deploy .     # deploy code model to runtime
+glyphh            # enter the Glyphh shell
+code init .       # deploy model, compile codebase, configure Claude Code
 ```
 
-### 4. Compile your codebase
+That's it. `code init` handles everything:
 
-```bash
-# Full compile (all indexable files)
-python compile.py /path/to/your/repo --runtime-url http://localhost:8002
+1. **Starts a local dev server** (SQLite, no Docker needed)
+2. **Deploys the Code model** to the running runtime
+3. **Compiles your codebase** into an HDC vector index
+4. **Configures Claude Code** — adds MCP server, CLAUDE.md, hooks, permissions
 
-# Incremental (changed files since last commit)
-python compile.py /path/to/your/repo --incremental
-
-# Incremental from a child repo / submodule commit
-python compile.py /path/to/your/repo --incremental --diff-repo /path/to/child/repo
-
-# Dry run (show what would be indexed)
-python compile.py /path/to/your/repo --dry-run
-```
-
-The `--diff-repo` flag tells compile.py to run `git diff HEAD^ HEAD` in a
-different repo than the source directory. Changed file paths are resolved
-relative to the child repo but the source directory is still used as the
-compile root. This is how the post-commit hook handles commits in monorepo
-subdirectories, child repos, and submodules.
-
-### 5. Connect Claude Code
-
-Add the MCP server using the Claude Code CLI:
-
-```bash
-claude mcp add --transport http glyphh http://localhost:8002/{org_id}/code/mcp
-```
-
-To find your org ID, run `glyphh auth status` in the Glyphh shell:
-
-```bash
-glyphh
-# glyphh> auth status
-#   org_id: your-org-id-here
-```
-
-In local mode the org ID is `local-dev-org`:
-
-```bash
-claude mcp add --transport http glyphh http://localhost:8002/local-dev-org/code/mcp
-```
-
-Restart Claude Code to pick up the MCP config. In VS Code: `Cmd+Shift+P` →
-"Claude Code: Restart". In the CLI: exit and re-enter the session.
+Restart Claude Code to activate. In VS Code: `Cmd+Shift+P` → "Claude Code:
+Restart". In the CLI: exit and re-enter the session.
 
 Verify the connection with `/mcp` — you should see `glyphh_search`,
 `glyphh_related`, and `glyphh_stats` listed as available tools.
 
-### 6. Add CLAUDE.md (recommended)
 
-Copy the included `CLAUDE.md` into your project root:
+## Using PostgreSQL + pgvector (optional)
+
+SQLite works out of the box for local development. For larger codebases or
+production use, you can use PostgreSQL with pgvector for faster similarity
+search via HNSW indexing.
 
 ```bash
-cp CLAUDE.md /path/to/your/project/CLAUDE.md
+# Set DATABASE_URL before starting the shell
+export DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/glyphh
+
+glyphh
+code init .
 ```
 
-Claude Code loads this file automatically at the start of every conversation.
-It teaches Claude Code to always search the Glyphh index before reading files,
-check blast radius before editing, and use `top_tokens` and `imports` from
-search results to avoid unnecessary file reads.
+Or use the built-in Docker setup:
 
-Without it, Claude Code will still have the MCP tools available but will fall
-back to its default file scanning behavior.
+```bash
+glyphh
+docker init       # generates docker-compose.yml + init.sql
+exit
+
+docker compose up -d --wait
+glyphh
+code init .
+```
+
+The runtime auto-detects the backend from `DATABASE_URL` — no configuration
+changes needed. SQLite uses Python cosine similarity; PostgreSQL uses native
+pgvector `<=>` with HNSW indexing.
+
+
+## Shell Commands
+
+After `pip install glyphh-code`, the `code` command is available inside the
+Glyphh shell:
+
+| Command | Description |
+|---------|-------------|
+| `code init [path]` | Full setup: start server, deploy, compile, configure Claude Code |
+| `code compile [path]` | Recompile the index (full or incremental) |
+| `code status` | Show current status (server, files indexed, MCP URL) |
+| `code stop` | Stop the dev server |
+
+The shell also has all standard runtime commands (`dev`, `model`, `auth`,
+`config`, etc.). Type `help` for the full list.
+
 
 ---
 
@@ -157,7 +124,8 @@ Same paradigm as all Glyphh models. The file is the exemplar.
 
 ```
 Build time:  read file → tokenize path + identifiers + imports
-             → encode into HDC vector → store vector + metadata in pgvector
+             → encode into HDC vector → store vector + metadata
+             → supports pgvector (HNSW) or SQLite (Python cosine)
 
 Runtime:     NL query → encode with same pipeline
              → cosine search against index
@@ -170,14 +138,17 @@ No LLM at build time. No LLM at runtime for search.
 
 ## Encoder
 
-Two-layer HDC encoder at 2,000 dimensions (pgvector HNSW compatible):
+Three-layer HDC encoder at 2,000 dimensions:
 
 | Layer | Weight | Signal |
 |-------|--------|--------|
 | **path** | 0.30 | File path tokens (BoW): `src/services/user_service.py` → `src services user service py` |
-| **content** | 0.70 | Source file vocabulary |
-| ↳ identifiers | 1.0 | All tokens from file content. camelCase/snake_case split before encoding |
-| ↳ imports | 0.8 | Import/require/include targets. Strong cross-file dependency signal |
+| **symbols** | 0.50 | AST-extracted definitions (class/function names via tree-sitter) |
+| **content** | 0.20 | Identifiers (1.0) + imports (0.8) as BoW |
+
+The symbols layer encodes what a file **defines**, not what it uses. This
+naturally separates source files from their tests — `auth.py` defines
+`AuthMiddleware` while `test_auth.py` defines `test_check_auth`.
 
 Metadata stored per file (not encoded, returned at search time):
 - `top_tokens`: 20 most frequent meaningful tokens
@@ -216,35 +187,18 @@ understand blast radius.
 Index statistics: total files, extension breakdown.
 
 
-## Drift scoring
-
-The `drift.py` module computes semantic drift between file versions:
-
-| Drift | Label | Meaning |
-|-------|-------|---------|
-| 0.00–0.10 | cosmetic | Formatting, comments, rename |
-| 0.10–0.30 | moderate | Logic update, new function |
-| 0.30–0.60 | significant | Behavioral change, new dependency |
-| 0.60–1.00 | architectural | Rewrite, interface change |
-
-
 ## Incremental compile
 
+The index is updated automatically after every `git commit` via the Claude Code
+PostToolUse hook configured by `code init`.
+
+For manual recompilation:
+
 ```bash
-# Recompile only files changed in the last commit
-python compile.py . --incremental
-
-# Recompile files changed in a specific commit
-python compile.py . --diff abc123
-
-# Recompile when commit was in a child repo / submodule
-python compile.py /path/to/monorepo --incremental --diff-repo /path/to/monorepo/child-repo
+glyphh
+code compile .                    # full recompile
+code compile /path/to/repo        # compile a different repo
 ```
-
-The index is updated automatically after every commit via the Claude Code
-PostToolUse hook (see [Claude Code hooks](#claude-code-hooks) below).
-For non-Claude workflows, a git post-commit hook is included at
-`hooks/post-commit`.
 
 
 ## File support
@@ -259,109 +213,34 @@ Skips: `.git`, `node_modules`, `__pycache__`, `dist`, `build`, `vendor`,
 Max file size: 500 KB. Binary files auto-skipped.
 
 
-## Disable MCP permission prompts
+## What `code init` configures
 
-By default Claude Code prompts for permission each time it calls an MCP tool.
-To allow Glyphh tools silently, add them to `.claude/settings.json` in your
+Running `code init .` in the Glyphh shell sets up the following in your
 project:
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__glyphh__glyphh_search",
-      "mcp__glyphh__glyphh_related",
-      "mcp__glyphh__glyphh_drift",
-      "mcp__glyphh__glyphh_risk"
-    ]
-  }
-}
-```
-
-Or use a wildcard to allow all tools from the Glyphh server:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__glyphh__*"
-    ]
-  }
-}
-```
-
-The first matching rule wins — Glyphh tools run silently while everything else
-still prompts.
+- **MCP server** — `claude mcp add --transport http glyphh <url>`
+- **CLAUDE.md** — instructs Claude to use `glyphh_search` before reading files
+- **`.claude/settings.json`** — hooks and permissions:
+  - `mcp__glyphh__*` permission (no MCP prompts)
+  - PreToolUse hook: blocks Grep/Glob, redirects to `glyphh_search`
+  - PostToolUse hook: runs incremental compile after `git commit`
+- **`.gitignore`** — adds `.glyphh/` entry
 
 
-## Claude Code hooks
-
-Two hooks are included to integrate Glyphh with Claude Code:
-
-1. **enforce-glyphh-search.sh** (PreToolUse) — blocks Grep and Glob calls,
-   redirecting Claude to `glyphh_search` instead
-2. **post-commit-compile.sh** (PostToolUse) — runs `compile.py --incremental`
-   after every `git commit` to keep the index up to date
-
-### post-commit-compile.sh
-
-The post-commit hook takes a **source directory** as its first argument. This
-is the root of the codebase you want indexed. The hook fires on any `git
-commit` that happens inside that directory — whether the commit is in the
-source directory itself, a child repo, or a submodule.
-
-When a commit lands in a child repo, the hook passes `--diff-repo` to
-`compile.py` so it diffs the correct repo while still compiling against the
-source directory root.
-
-Add both hooks to `.claude/settings.json` in your project:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Grep|Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/model-code/hooks/enforce-glyphh-search.sh"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/model-code/hooks/post-commit-compile.sh /path/to/source/dir"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Replace `/path/to/model-code` with wherever you cloned this repo and
-`/path/to/source/dir` with the root of the codebase to index.
-
-### Environment variables
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DATABASE_URL` | SQLite (`~/.glyphh/local.db`) | Database connection string |
 | `GLYPHH_RUNTIME_URL` | `http://localhost:8002` | Runtime endpoint |
 | `GLYPHH_TOKEN` | Auto-resolved from CLI session | Auth token |
 | `GLYPHH_ORG_ID` | Auto-resolved from CLI session | Org ID |
-| `GLYPHH_PYTHON` | `/opt/homebrew/anaconda3/bin/python` | Python interpreter (must have `requests`) |
-| `GLYPHH_HOOK_DISABLE` | — | Set to `1` to temporarily disable the hook |
+| `GLYPHH_HOOK_DISABLE` | — | Set to `1` to temporarily disable hooks |
 
 
 ## Tests
 
 ```bash
-cd glyphh-models/code
-PYTHONPATH=../../glyphh-runtime pytest tests/ -v
+pip install glyphh-code[dev]
+pytest tests/ -v
 ```

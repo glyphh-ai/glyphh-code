@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glyphh-code"
+version = "0.1.0"
+description = "Codebase intelligence for Claude Code — HDC-powered file search"
+readme = "README.md"
+license = {text = "AGPL-3.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Glyphh AI", email = "support@glyphh.ai"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "glyphh[runtime]>=1.3.3",
+    "requests>=2.28.0",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python>=0.22.0",
+    "tree-sitter-javascript>=0.22.0",
+    "tree-sitter-typescript>=0.22.0",
+    "tree-sitter-go>=0.22.0",
+    "tree-sitter-rust>=0.22.0",
+    "tree-sitter-java>=0.22.0",
+    "tree-sitter-c>=0.22.0",
+    "tree-sitter-cpp>=0.22.0",
+]
+
+[project.optional-dependencies]
+all-grammars = [
+    "tree-sitter-ruby>=0.22.0",
+    "tree-sitter-c-sharp>=0.22.0",
+    "tree-sitter-swift>=0.22.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+glyphh-code = "glyphh_code.cli:main"
+
+[project.entry-points."glyphh.plugins"]
+code = "glyphh_code.plugin:register"
+
+[project.urls]
+Homepage = "https://glyphh.ai"
+Repository = "https://github.com/glyphh-ai/glyphh-code"
+Documentation = "https://docs.glyphh.ai"
+
+[tool.setuptools.packages.find]
+include = ["glyphh_code*"]
+
+[tool.setuptools.package-data]
+"glyphh_code" = [
+    "*.yaml",
+    "*.json",
+    "*.md",
+    "*.sh",
+    "hooks/*.sh",
+]

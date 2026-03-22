@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""Code search benchmark — Glyphh vs bare LLM.
+"""Code search benchmark — Glyphh + LLM vs bare LLM.
 
-Measures how efficiently Claude finds and acts on files in a codebase
-with and without Glyphh. Runs the same queries in two modes:
+Models the real Claude Code workflow: LLM gets a task, navigates to the
+right file, reads it, and responds. Measures total cost to complete the
+task, not just search accuracy.
 
-  Mode A — With Glyphh:
-    Claude has glyphh_search as a tool. Calls it, gets ranked files with
-    top_tokens and imports. Should find the right file in one tool call.
+Three modes:
 
-  Mode B — Without Glyphh (bare LLM):
-    Claude has Glob and Read as tools (standard Claude Code). Must scan
-    the directory tree and read files to find what it needs.
+  combined — LLM has glyphh_search + glob/grep/read (real Claude Code)
+    Glyphh narrows the search space. LLM trusts high-confidence results,
+    reads the file, and acts. Falls back to grep/glob on misses.
 
-Metrics:
-  - Search accuracy: did the right file appear in results?
-  - Tool calls: how many calls to reach the right file?
-  - Tokens: input + output tokens consumed
-  - Latency: wall-clock time per query
-  - Cost: USD per query
+  bare — LLM has glob/grep/read only (standard Claude Code without Glyphh)
+    Must scan directories and grep to find the right file.
+
+  glyphh — HDC only, no LLM reasoning (measures raw index accuracy)
+    Just checks if the expected file appears in the top-K results.
+
+Success = LLM reads the correct file (combined/bare) or file appears
+in results (glyphh). The real metric is total tokens to get there.
 
 Usage:
-    python benchmark/run_benchmark.py
-    python benchmark/run_benchmark.py --model claude-haiku-4-5-20251001
-    python benchmark/run_benchmark.py --model claude-sonnet-4-5-20250514
-    python benchmark/run_benchmark.py --mode glyphh   # Glyphh only
-    python benchmark/run_benchmark.py --mode bare      # bare LLM only
-    python benchmark/run_benchmark.py --limit 10       # subset of test cases
+    python benchmark/run_benchmark.py                    # combined + bare
+    python benchmark/run_benchmark.py --mode combined    # Glyphh + LLM
+    python benchmark/run_benchmark.py --mode bare        # bare LLM only
+    python benchmark/run_benchmark.py --mode glyphh      # HDC only
+    python benchmark/run_benchmark.py --mode all         # all three
+    python benchmark/run_benchmark.py --limit 5          # subset
 
 Requires:
     ANTHROPIC_API_KEY
@@ -69,7 +70,7 @@ PRICING = {
 MCP_URL_TEMPLATE = "{runtime_url}/{org_id}/{model_id}/mcp"
 
 # Max tool-use loop iterations
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +207,29 @@ SYSTEM_GLYPHH = (
 )
 
 SYSTEM_BARE = (
-    "You are a code assistant working on a Python codebase.\n"
+    "You are a code assistant working on a codebase with ~760 files.\n"
     "You have access to glob (list files), grep (search contents), "
-    "and read (read a file).\n"
-    "The codebase is rooted at 'src/fastmcp/' with ~760 files.\n"
-    "Find the file the user is asking about and respond with "
-    "the file path and a brief explanation."
+    "and read (read a file).\n\n"
+    "Complete the user's task:\n"
+    "1. Find the relevant file using glob/grep.\n"
+    "2. Read the file to confirm it's the right one.\n"
+    "3. Respond with the file path and answer the user's question.\n\n"
+    "You MUST read the target file before answering. "
+    "Do not guess — confirm by reading."
+)
+
+SYSTEM_COMBINED = (
+    "You are a code assistant with access to a Glyphh codebase index AND "
+    "standard file tools (glob, grep, read).\n\n"
+    "Complete the user's task:\n"
+    "1. Call glyphh_search to find the relevant file.\n"
+    "2. Look at the top result's file path and top_tokens. If the path "
+    "clearly matches (e.g. 'authorization.py' for an auth query), read it.\n"
+    "3. If the top result is a test file, or the path doesn't match the "
+    "concept, use grep to search for the right source file directly.\n"
+    "4. Read the file to confirm it's correct, then answer.\n\n"
+    "Glyphh gives you a starting point — use it to orient, not as the "
+    "final answer. You MUST read the target file before answering."
 )
 
 
@@ -412,7 +430,10 @@ def run_bare_test(
     repo_root: str,
     test_case: dict,
 ) -> dict:
-    """Run a test case without Glyphh (bare LLM with glob/grep/read)."""
+    """Run a task without Glyphh (bare LLM with glob/grep/read).
+
+    Success = LLM read the correct file.
+    """
     query = test_case["query"]
     expected = test_case.get("expected_file") or test_case.get("target_file", "")
 
@@ -429,7 +450,7 @@ def run_bare_test(
     for _ in range(MAX_ITERATIONS):
         response = client.messages.create(
             model=model,
-            max_tokens=512,
+            max_tokens=1024,
             system=SYSTEM_BARE,
             messages=messages,
             tools=tools,
@@ -464,9 +485,8 @@ def run_bare_test(
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
-    # Check if Claude mentioned or read the expected file
-    all_text = " ".join(text_parts)
-    found = expected in all_text or expected in files_read
+    # Success = LLM read the correct file
+    found = expected in files_read
 
     return {
         "id": test_case["id"],
@@ -474,7 +494,6 @@ def run_bare_test(
         "query": query,
         "expected_file": expected,
         "found": found,
-        "rank": -1,  # Not applicable for bare mode
         "tool_calls": tool_calls,
         "input_tokens": total_input,
         "output_tokens": total_output,
@@ -482,7 +501,116 @@ def run_bare_test(
         "cost_usd": round(_compute_cost(total_input, total_output, model), 6),
         "latency_ms": round(elapsed_ms, 1),
         "files_read": files_read,
-        "response": all_text[:200],
+        "response": " ".join(text_parts)[:200] if text_parts else "",
+    }
+
+
+def run_combined_test(
+    client: anthropic.Anthropic,
+    model: str,
+    mcp_url: str,
+    repo_root: str,
+    test_case: dict,
+) -> dict:
+    """Run a task with Glyphh + LLM (models real Claude Code usage).
+
+    The LLM gets glyphh_search + glob/grep/read. It should:
+    1. Call glyphh_search to find the file
+    2. Read the top result to confirm
+    3. Answer the user's question
+
+    Success = LLM read the correct file.
+    """
+    query = test_case["query"]
+    expected = test_case.get("expected_file") or test_case.get("target_file", "")
+    top_k_required = test_case.get("expected_in_top_k", 5)
+
+    t0 = time.perf_counter()
+    total_input = 0
+    total_output = 0
+    tool_calls = 0
+    glyphh_calls = 0
+    bare_calls = 0
+    files_read = []
+    text_parts = []
+    used_fallback = False
+
+    messages = [{"role": "user", "content": query}]
+    tools = [GLYPHH_SEARCH_TOOL, GLOB_TOOL, GREP_TOOL, READ_TOOL]
+
+    for _ in range(MAX_ITERATIONS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=SYSTEM_COMBINED,
+            messages=messages,
+            tools=tools,
+        )
+
+        total_input += response.usage.input_tokens
+        total_output += response.usage.output_tokens
+
+        tool_results = []
+
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls += 1
+
+                if block.name == "glyphh_search":
+                    glyphh_calls += 1
+                    search_query = block.input.get("query", query)
+                    result = glyphh_search(mcp_url, search_query, top_k=top_k_required)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
+                else:
+                    # File tool (glob/grep/read)
+                    bare_calls += 1
+                    if block.name != "read":
+                        used_fallback = True
+                    result_text = _execute_bare_tool(
+                        block.name, block.input, repo_root,
+                    )
+                    if block.name == "read":
+                        files_read.append(block.input.get("file_path", ""))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+        if not tool_results:
+            break
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    # Success = LLM read the correct file
+    found = expected in files_read
+
+    return {
+        "id": test_case["id"],
+        "type": test_case["type"],
+        "query": query,
+        "expected_file": expected,
+        "found": found,
+        "tool_calls": tool_calls,
+        "glyphh_calls": glyphh_calls,
+        "bare_calls": bare_calls,
+        "used_fallback": used_fallback,
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "total_tokens": total_input + total_output,
+        "cost_usd": round(_compute_cost(total_input, total_output, model), 6),
+        "latency_ms": round(elapsed_ms, 1),
+        "files_read": files_read,
+        "response": " ".join(text_parts)[:200] if text_parts else "",
     }
 
 
@@ -526,6 +654,20 @@ def print_summary(label: str, results: list[dict], model: str):
 
     print()
 
+    # Combined mode: show fallback stats
+    if any("used_fallback" in r for r in results):
+        glyphh_only = sum(1 for r in results if r.get("found") and not r.get("used_fallback"))
+        with_fallback = sum(1 for r in results if r.get("found") and r.get("used_fallback"))
+        fallback_used = sum(1 for r in results if r.get("used_fallback"))
+        avg_glyphh_calls = sum(r.get("glyphh_calls", 0) for r in results) / total if total else 0
+        avg_bare_calls = sum(r.get("bare_calls", 0) for r in results) / total if total else 0
+        print(f"  Glyphh-only wins: {glyphh_only}/{total} ({glyphh_only/total*100:.0f}%)")
+        print(f"  Fallback needed:  {fallback_used}/{total} ({fallback_used/total*100:.0f}%)")
+        print(f"  Fallback wins:    {with_fallback}/{fallback_used if fallback_used else 1}")
+        print(f"  Avg Glyphh calls: {avg_glyphh_calls:.1f}")
+        print(f"  Avg bare calls:   {avg_bare_calls:.1f}")
+        print()
+
     # Show failures
     failures = [r for r in results if not r["found"]]
     if failures:
@@ -546,8 +688,8 @@ def main():
         help="Anthropic model ID (default: claude-haiku-4-5-20251001)",
     )
     parser.add_argument(
-        "--mode", choices=["both", "glyphh", "bare"], default="both",
-        help="Which mode to run (default: both)",
+        "--mode", choices=["both", "glyphh", "bare", "combined", "all"], default="both",
+        help="Which mode to run. 'both' = combined + bare (default). 'all' = all three.",
     )
     parser.add_argument(
         "--limit", type=int, default=0,
@@ -593,8 +735,8 @@ def main():
     ts = time.strftime("%Y%m%d_%H%M%S")
     tier = _model_tier(args.model)
 
-    # --- Glyphh mode ---
-    if args.mode in ("both", "glyphh"):
+    # --- Glyphh-only mode (HDC accuracy, no LLM reasoning) ---
+    if args.mode in ("glyphh", "all"):
         print("Running Glyphh mode...")
         glyphh_results = []
         for i, tc in enumerate(test_cases):
@@ -622,7 +764,7 @@ def main():
         print_summary("WITH GLYPHH", glyphh_results, args.model)
 
     # --- Bare LLM mode ---
-    if args.mode in ("both", "bare"):
+    if args.mode in ("both", "bare", "all"):
         print("Running bare LLM mode...")
         bare_results = []
         for i, tc in enumerate(test_cases):
@@ -649,29 +791,103 @@ def main():
         print(f"  Saved: {out_path}")
         print_summary("WITHOUT GLYPHH (bare LLM)", bare_results, args.model)
 
-    # --- Comparison ---
+    # --- Combined mode (Glyphh + LLM — real Claude Code workflow) ---
+    if args.mode in ("both", "combined", "all"):
+        print("Running combined mode (Glyphh + LLM fallback)...")
+        combined_results = []
+        for i, tc in enumerate(test_cases):
+            try:
+                r = run_combined_test(
+                    client, args.model, mcp_url, args.repo_root, tc,
+                )
+                combined_results.append(r)
+                status = "✓" if r["found"] else "✗"
+                fb = " (fallback)" if r.get("used_fallback") else ""
+                print(f"  [{i+1}/{len(test_cases)}] {status} {tc['id']} "
+                      f"({r['glyphh_calls']}g+{r['bare_calls']}b calls, "
+                      f"{r['total_tokens']} tokens, "
+                      f"{r['latency_ms']:.0f}ms){fb}")
+            except Exception as e:
+                print(f"  [{i+1}/{len(test_cases)}] ERROR {tc['id']}: {e}")
+                combined_results.append({
+                    "id": tc["id"], "type": tc["type"], "query": tc["query"],
+                    "expected_file": tc.get("expected_file", tc.get("target_file", "")),
+                    "found": False, "rank": -1, "tool_calls": 0,
+                    "glyphh_calls": 0, "bare_calls": 0, "used_fallback": False,
+                    "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                    "cost_usd": 0, "latency_ms": 0, "error": str(e),
+                })
+
+        out_path = RESULTS_DIR / f"combined_{tier}_{ts}.json"
+        with open(out_path, "w") as f:
+            json.dump({"model": args.model, "mode": "combined", "results": combined_results}, f, indent=2)
+        print(f"  Saved: {out_path}")
+        print_summary("GLYPHH + LLM FALLBACK", combined_results, args.model)
+
+    # --- Head-to-head: Combined vs Bare ---
     if args.mode == "both":
         print("=" * 60)
-        print("  HEAD-TO-HEAD COMPARISON")
+        print("  HEAD-TO-HEAD: GLYPHH + LLM vs BARE LLM")
+        print("=" * 60)
+
+        c = combined_results
+        b = bare_results
+        n = len(test_cases)
+
+        c_found = sum(1 for r in c if r["found"])
+        b_found = sum(1 for r in b if r["found"])
+        c_tokens = sum(r["total_tokens"] for r in c)
+        b_tokens = sum(r["total_tokens"] for r in b)
+        c_cost = sum(r["cost_usd"] for r in c)
+        b_cost = sum(r["cost_usd"] for r in b)
+        c_calls = sum(r["tool_calls"] for r in c)
+        b_calls = sum(r["tool_calls"] for r in b)
+        c_latency = sum(r["latency_ms"] for r in c)
+        b_latency = sum(r["latency_ms"] for r in b)
+
+        print(f"  {'':20s} {'Glyphh+LLM':>12s} {'Bare LLM':>12s} {'Savings':>10s}")
+        print(f"  {'-'*20} {'-'*12} {'-'*12} {'-'*10}")
+        print(f"  {'Accuracy':20s} {c_found:>7d}/{n:<4d} {b_found:>7d}/{n:<4d}")
+        print(f"  {'Avg tokens':20s} {c_tokens/n:>12.0f} {b_tokens/n:>12.0f} {(1-c_tokens/max(b_tokens,1))*100:>9.0f}%")
+        print(f"  {'Avg tool calls':20s} {c_calls/n:>12.1f} {b_calls/n:>12.1f} {(1-c_calls/max(b_calls,1))*100:>9.0f}%")
+        print(f"  {'Avg latency':20s} {c_latency/n:>10.0f}ms {b_latency/n:>10.0f}ms {(1-c_latency/max(b_latency,1))*100:>9.0f}%")
+        print(f"  {'Total cost':20s} ${c_cost:>11.4f} ${b_cost:>11.4f} {(1-c_cost/max(b_cost,0.0001))*100:>9.0f}%")
+        print()
+
+    if args.mode == "all":
+        print("=" * 60)
+        print("  THREE-WAY COMPARISON")
         print("=" * 60)
 
         g = glyphh_results
         b = bare_results
+        c = combined_results
+        n = len(test_cases)
+
         g_found = sum(1 for r in g if r["found"])
         b_found = sum(1 for r in b if r["found"])
+        c_found = sum(1 for r in c if r["found"])
         g_tokens = sum(r["total_tokens"] for r in g)
         b_tokens = sum(r["total_tokens"] for r in b)
+        c_tokens = sum(r["total_tokens"] for r in c)
         g_cost = sum(r["cost_usd"] for r in g)
         b_cost = sum(r["cost_usd"] for r in b)
+        c_cost = sum(r["cost_usd"] for r in c)
         g_calls = sum(r["tool_calls"] for r in g)
         b_calls = sum(r["tool_calls"] for r in b)
+        c_calls = sum(r["tool_calls"] for r in c)
 
-        n = len(test_cases)
-        print(f"  {'':20s} {'Glyphh':>10s} {'Bare LLM':>10s} {'Ratio':>10s}")
-        print(f"  {'Accuracy':20s} {g_found:>5d}/{n:<4d} {b_found:>5d}/{n:<4d}")
-        print(f"  {'Avg tokens':20s} {g_tokens/n:>10.0f} {b_tokens/n:>10.0f} {b_tokens/max(g_tokens,1):>9.1f}x")
-        print(f"  {'Avg tool calls':20s} {g_calls/n:>10.1f} {b_calls/n:>10.1f} {b_calls/max(g_calls,1):>9.1f}x")
-        print(f"  {'Total cost':20s} ${g_cost:>9.4f} ${b_cost:>9.4f} {b_cost/max(g_cost,0.0001):>9.1f}x")
+        print(f"  {'':20s} {'Glyphh':>10s} {'Combined':>10s} {'Bare LLM':>10s}")
+        print(f"  {'':20s} {'(HDC only)':>10s} {'(G + LLM)':>10s} {'(no Glyphh)':>10s}")
+        print(f"  {'-'*20} {'-'*10} {'-'*10} {'-'*10}")
+        print(f"  {'Accuracy':20s} {g_found:>5d}/{n:<4d} {c_found:>5d}/{n:<4d} {b_found:>5d}/{n:<4d}")
+        print(f"  {'Avg tokens':20s} {g_tokens/n:>10.0f} {c_tokens/n:>10.0f} {b_tokens/n:>10.0f}")
+        print(f"  {'Avg tool calls':20s} {g_calls/n:>10.1f} {c_calls/n:>10.1f} {b_calls/n:>10.1f}")
+        print(f"  {'Total cost':20s} ${g_cost:>9.4f} ${c_cost:>9.4f} ${b_cost:>9.4f}")
+        print()
+        savings = (1 - c_tokens / max(b_tokens, 1)) * 100
+        print(f"  Combined vs Bare: {savings:.0f}% token savings, "
+              f"{c_found - b_found:+d} accuracy delta")
         print()
 
 

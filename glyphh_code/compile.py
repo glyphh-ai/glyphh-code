@@ -28,10 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-# Allow importing from this directory
-sys.path.insert(0, str(Path(__file__).parent))
-
-from encoder import SKIP_DIRS, INDEXABLE_EXTENSIONS, MAX_FILE_BYTES, file_to_record  # noqa: E402
+from glyphh_code.encoder import SKIP_DIRS, INDEXABLE_EXTENSIONS, MAX_FILE_BYTES, file_to_record
 
 
 DEFAULT_RUNTIME_URL = "http://localhost:8002"

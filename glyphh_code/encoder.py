@@ -448,7 +448,7 @@ def file_to_record(
     top_tokens = _top_tokens(identifiers)
 
     # AST extraction — deterministic, language-agnostic via tree-sitter
-    from ast_extract import extract_file_symbols
+    from glyphh_code.ast_extract import extract_file_symbols
     symbols = extract_file_symbols(rel_path, content)
     defines = symbols.get("defines", "")
     docstring = symbols.get("docstring", "")
