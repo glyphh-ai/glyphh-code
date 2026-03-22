@@ -10,7 +10,6 @@ Registers as 'code' command via entry points:
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -129,14 +128,21 @@ def _configure_claude_code(repo_path: str, mcp_url: str):
         click.secho("  ✗ Claude Code CLI not found", fg=theme.WARNING)
         click.secho(f"    Run: claude mcp add --transport http glyphh {mcp_url}", fg=theme.TEXT_DIM)
 
-    # 2. Copy CLAUDE.md if not present
+    # 2. Add Glyphh instructions to CLAUDE.md
     target_claude_md = repo / "CLAUDE.md"
     source_claude_md = _PACKAGE_DIR / "CLAUDE.md"
-    if not target_claude_md.exists() and source_claude_md.exists():
-        shutil.copy2(source_claude_md, target_claude_md)
-        click.secho("  ✓ CLAUDE.md added to project root", fg=theme.SUCCESS)
-    elif target_claude_md.exists():
-        click.secho("  ○ CLAUDE.md already exists (skipped)", fg=theme.TEXT_DIM)
+    _GLYPHH_MARKER = "# Glyphh Code Intelligence"
+    if source_claude_md.exists():
+        glyphh_section = source_claude_md.read_text()
+        if not target_claude_md.exists():
+            target_claude_md.write_text(glyphh_section)
+            click.secho("  ✓ CLAUDE.md created with Glyphh instructions", fg=theme.SUCCESS)
+        elif _GLYPHH_MARKER not in target_claude_md.read_text():
+            with open(target_claude_md, "a") as f:
+                f.write(f"\n\n{glyphh_section}")
+            click.secho("  ✓ Glyphh instructions appended to CLAUDE.md", fg=theme.SUCCESS)
+        else:
+            click.secho("  ○ CLAUDE.md already has Glyphh instructions", fg=theme.TEXT_DIM)
 
     # 3. Add hooks + permissions to .claude/settings.json
     claude_dir = repo / ".claude"

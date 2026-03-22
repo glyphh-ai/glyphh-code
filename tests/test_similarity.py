@@ -8,7 +8,7 @@ from glyphh.core.ops import cosine_similarity
 from encoder import ENCODER_CONFIG, encode_query
 
 # Layer weights matching the encoder config
-_LAYER_WEIGHTS = {"path": 0.30, "symbols": 0.50, "content": 0.20}
+_LAYER_WEIGHTS = {"path": 0.25, "symbols": 0.25, "content": 0.50}
 
 
 @pytest.fixture

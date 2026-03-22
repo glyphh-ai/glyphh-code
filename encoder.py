@@ -52,7 +52,7 @@ ENCODER_CONFIG = EncoderConfig(
     layers=[
         Layer(
             name="path",
-            similarity_weight=0.30,
+            similarity_weight=0.25,
             segments=[
                 Segment(
                     name="location",
@@ -69,7 +69,7 @@ ENCODER_CONFIG = EncoderConfig(
         ),
         Layer(
             name="symbols",
-            similarity_weight=0.50,
+            similarity_weight=0.25,
             segments=[
                 Segment(
                     name="definitions",
@@ -95,7 +95,7 @@ ENCODER_CONFIG = EncoderConfig(
         ),
         Layer(
             name="content",
-            similarity_weight=0.20,
+            similarity_weight=0.50,
             segments=[
                 Segment(
                     name="vocabulary",
@@ -173,9 +173,9 @@ _STOP_WORDS = frozenset({
 })
 
 # Layer weights for scoring — must match ENCODER_CONFIG
-_PATH_WEIGHT = 0.30
-_SYMBOLS_WEIGHT = 0.50
-_CONTENT_WEIGHT = 0.20
+_PATH_WEIGHT = 0.25
+_SYMBOLS_WEIGHT = 0.25
+_CONTENT_WEIGHT = 0.50
 
 
 # ---------------------------------------------------------------------------
