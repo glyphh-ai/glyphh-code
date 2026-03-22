@@ -29,21 +29,29 @@ class TestEncoderConfig:
     def test_seed(self):
         assert ENCODER_CONFIG.seed == 42
 
-    def test_two_layers(self):
-        assert len(ENCODER_CONFIG.layers) == 2
+    def test_three_layers(self):
+        assert len(ENCODER_CONFIG.layers) == 3
 
     def test_path_layer(self):
         path_layer = ENCODER_CONFIG.layers[0]
         assert path_layer.name == "path"
         assert path_layer.similarity_weight == 0.30
 
+    def test_symbols_layer(self):
+        symbols_layer = ENCODER_CONFIG.layers[1]
+        assert symbols_layer.name == "symbols"
+        assert symbols_layer.similarity_weight == 0.50
+        defs = symbols_layer.segments[0]
+        role_names = {r.name for r in defs.roles}
+        assert role_names == {"defines", "docstring", "file_role"}
+
     def test_content_layer(self):
-        content_layer = ENCODER_CONFIG.layers[1]
+        content_layer = ENCODER_CONFIG.layers[2]
         assert content_layer.name == "content"
-        assert content_layer.similarity_weight == 0.70
+        assert content_layer.similarity_weight == 0.20
 
     def test_content_has_two_roles(self):
-        content = ENCODER_CONFIG.layers[1]
+        content = ENCODER_CONFIG.layers[2]
         vocab = content.segments[0]
         assert len(vocab.roles) == 2
         role_names = {r.name for r in vocab.roles}

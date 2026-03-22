@@ -350,8 +350,8 @@ def encode_query(query: str) -> dict:
         docstring = clean
 
         # Content layer: code-level tokens for disambiguation
-        identifiers = keywords or clean
-        imports = keywords or clean
+        identifiers = clean
+        imports = clean
 
     stable_id = int(hashlib.md5(query.encode()).hexdigest()[:8], 16)
 

@@ -7,18 +7,24 @@ from glyphh.core.ops import cosine_similarity
 
 from encoder import ENCODER_CONFIG, encode_query
 
+# Layer weights matching the encoder config
+_LAYER_WEIGHTS = {"path": 0.30, "symbols": 0.50, "content": 0.20}
+
 
 @pytest.fixture
 def encoder():
     return Encoder(ENCODER_CONFIG)
 
 
-def _encode_file(encoder, path_tokens, identifiers, imports=""):
+def _encode_file(encoder, path_tokens, identifiers, imports="", defines="", file_role="source"):
     """Helper to encode a file record as a glyph."""
     return encoder.encode(Concept(
         name=path_tokens.replace(" ", "/"),
         attributes={
             "path_tokens": path_tokens,
+            "defines": defines or identifiers,
+            "docstring": "",
+            "file_role": file_role,
             "identifiers": identifiers,
             "imports": imports,
         },
@@ -26,12 +32,30 @@ def _encode_file(encoder, path_tokens, identifiers, imports=""):
 
 
 def _encode_query(encoder, query):
-    """Helper to encode a NL query as a glyph."""
+    """Helper to encode a NL query as a glyph.
+
+    encode_query already returns all layer attributes (path_tokens,
+    defines, docstring, file_role, identifiers, imports).
+    """
     result = encode_query(query)
     return encoder.encode(Concept(
         name=result["name"],
         attributes=result["attributes"],
     ))
+
+
+def _weighted_similarity(g1, g2):
+    """Compute weighted layer similarity (excludes temporal noise).
+
+    This matches how the runtime's GlyphStorage.similarity_search_by_level
+    scores results — per-layer cosine similarity weighted by config weights.
+    """
+    total = 0.0
+    for name, weight in _LAYER_WEIGHTS.items():
+        if name in g1.layers and name in g2.layers:
+            sim = cosine_similarity(g1.layers[name].cortex.data, g2.layers[name].cortex.data)
+            total += weight * sim
+    return total
 
 
 class TestSimilarityBasics:
@@ -40,8 +64,8 @@ class TestSimilarityBasics:
     def test_identical_files_perfect_similarity(self, encoder):
         g1 = _encode_file(encoder, "src services auth py", "auth token validate jwt hash")
         g2 = _encode_file(encoder, "src services auth py", "auth token validate jwt hash")
-        sim = cosine_similarity(g1.global_cortex.data, g2.global_cortex.data)
-        assert sim == 1.0
+        sim = _weighted_similarity(g1, g2)
+        assert sim == pytest.approx(1.0)
 
     def test_different_files_lower_than_related(self, encoder):
         """Unrelated files should score lower than related ones."""
@@ -49,8 +73,8 @@ class TestSimilarityBasics:
         css = _encode_file(encoder, "lib css theme scss", "color font margin padding border")
         test_auth = _encode_file(encoder, "tests test auth py", "test auth token validate mock")
 
-        sim_unrelated = cosine_similarity(auth.global_cortex.data, css.global_cortex.data)
-        sim_related = cosine_similarity(auth.global_cortex.data, test_auth.global_cortex.data)
+        sim_unrelated = _weighted_similarity(auth, css)
+        sim_related = _weighted_similarity(auth, test_auth)
         assert sim_related > sim_unrelated
 
     def test_related_files_moderate_similarity(self, encoder):
@@ -66,7 +90,7 @@ class TestSimilarityBasics:
             "test create user test delete user mock fixture",
             "pytest mock services user",
         )
-        sim = cosine_similarity(g1.global_cortex.data, g2.global_cortex.data)
+        sim = _weighted_similarity(g1, g2)
         assert 0.20 < sim < 0.80  # Related but not identical
 
 
@@ -128,7 +152,7 @@ class TestQueryRouting:
         """Find the best matching file for a query."""
         q = _encode_query(encoder, query)
         scores = {
-            name: cosine_similarity(q.global_cortex.data, g.global_cortex.data)
+            name: _weighted_similarity(q, g)
             for name, g in file_glyphs.items()
         }
         return max(scores, key=scores.get), scores
@@ -206,26 +230,26 @@ class TestImportSignal:
     def test_shared_imports_increase_similarity(self, encoder):
         """Files sharing imports should be more similar than those with no overlap."""
         g_shared = _encode_file(
-            encoder, "src a py", "foo bar",
-            "sqlalchemy fastapi pydantic",
+            encoder, "src services a py",
+            "user create update delete query",
+            "sqlalchemy fastapi pydantic alembic",
+            defines="UserService create_user update_user",
         )
         g_also_shared = _encode_file(
-            encoder, "src b py", "baz qux",
-            "sqlalchemy fastapi httpx",
+            encoder, "src services b py",
+            "account create update delete query",
+            "sqlalchemy fastapi httpx alembic",
+            defines="AccountService create_account update_account",
         )
         g_different = _encode_file(
-            encoder, "src c py", "baz qux",
-            "react nextjs tailwind",
+            encoder, "src components c tsx",
+            "render widget chart dashboard layout",
+            "react nextjs tailwind recharts",
+            defines="DashboardWidget render_chart",
         )
 
-        sim_shared = cosine_similarity(
-            g_shared.global_cortex.data,
-            g_also_shared.global_cortex.data,
-        )
-        sim_different = cosine_similarity(
-            g_shared.global_cortex.data,
-            g_different.global_cortex.data,
-        )
+        sim_shared = _weighted_similarity(g_shared, g_also_shared)
+        sim_different = _weighted_similarity(g_shared, g_different)
         assert sim_shared > sim_different
 
 
