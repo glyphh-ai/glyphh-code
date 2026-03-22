@@ -48,7 +48,7 @@ REPO_ROOT = "/Users/timmetim/development/a-test/fastmcp"
 MCP_CONFIG = {
     "mcpServers": {
         "glyphh": {
-            "type": "sse",
+            "type": "http",
             "url": "http://localhost:8002/local-dev-org/code/mcp",
         }
     }

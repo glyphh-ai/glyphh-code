@@ -12,12 +12,23 @@ Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs
 
 ---
 
-> **WORK IN PROGRESS** — This model is under active development. Benchmarks
-> show Glyphh uses **20% fewer tokens and 22% fewer turns** than bare Claude
-> Code, with equal search accuracy (13/15). Overall accuracy is 76% vs 84%
-> due to MCP startup latency causing timeouts — not an HDC issue. See
-> [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for full results and
-> analysis.
+> **MODEL IN DEVELOPMENT** — Early results on a 764-file repo (fastmcp):
+>
+> | Metric | With Glyphh | Without Glyphh | Delta |
+> |--------|-------------|----------------|-------|
+> | **Cost** | $0.16 | $0.28 | **-43%** |
+> | **Wall time** | 24s | 2m 0s | **-5x faster** |
+> | **Tool calls** | 1 MCP call | 36 (Explore agent) | **-97%** |
+>
+> Tested on blast radius queries ("edit X, what else might break?") — the
+> sweet spot for HDC semantic search. Glyphh returns ranked related files
+> with similarity scores in a single call. Without it, Claude spawns an
+> Explore agent that greps/globs/reads 36 files to reach a similar answer.
+>
+> **Not a Grep replacement.** Grep wins for navigation (exact string matches,
+> symbol lookups). Glyphh wins for semantic queries: blast radius, relatedness,
+> "what handles X". See [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for
+> the full automated benchmark (25 test cases, search/edit/debug/understand).
 
 ## Quick Start
 
@@ -222,7 +233,6 @@ project:
 - **CLAUDE.md** — instructs Claude to use `glyphh_search` before reading files
 - **`.claude/settings.json`** — hooks and permissions:
   - `mcp__glyphh__*` permission (no MCP prompts)
-  - PreToolUse hook: blocks Grep/Glob, redirects to `glyphh_search`
   - PostToolUse hook: runs incremental compile after `git commit`
 - **`.gitignore`** — adds `.glyphh/` entry
 
