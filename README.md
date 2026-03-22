@@ -8,7 +8,7 @@ Same architecture as glyphh-pipedream (3,146 apps) and glyphh-bfcl (#1 on
 BFCL V4). No LLM at build time. No LLM at search time. Pure HDC encoding and
 cosine search.
 
-Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs →](https://glyphh.ai/docs)** · **[Glyphh Hub →](https://glyphh.ai/hub)**
+Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs →](https://glyphh.ai/docs)** · **[Glyphh Hub →](https://glyphh.ai/hub)** · **License: [AGPL-3.0](LICENSE)**
 
 ---
 
