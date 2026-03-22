@@ -945,22 +945,6 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
 
     children = [_format_match(r) for r in ranked[:top_k]]
     top_score = children[0]["value"]
-    gap = top_score - children[1]["value"] if len(children) > 1 else 1.0
-
-    if top_score < 0.10 or gap < 0.02:
-        return {
-            "state": "ASK",
-            "fact_tree": {
-                "description": "Similarity Computation",
-                "value": None,
-                "children": children[:3],
-                "citations": [],
-                "data_context": {},
-            },
-            "confidence": top_score,
-            "match_method": "code_search",
-            "error": "Multiple similar files found. Which did you mean?",
-        }
 
     return {
         "state": "DONE",
