@@ -163,6 +163,15 @@ _STOP_WORDS = frozenset({
     "it", "be", "on", "at", "by", "do", "if", "my",
     "we", "so", "up", "are", "but", "not", "all", "can",
     "had", "her", "was", "one", "our", "has", "no",
+    # NL query noise — common in questions but never code identifiers
+    "through", "between", "across", "within", "during", "about",
+    "into", "also", "work", "works", "working", "does", "could",
+    "would", "should", "might", "need", "needs", "when", "then",
+    "there", "here", "been", "being", "have", "will", "just",
+    "other", "some", "each", "every", "these", "those", "than",
+    "them", "they", "its", "any", "may", "way", "like", "used",
+    "use", "using", "make", "made", "would", "after", "before",
+    "propagation", "involved", "manages", "deal", "deals",
     # Code noise
     "code", "file", "files", "function", "class", "method",
     "def", "var", "let", "const", "return", "import", "from",
@@ -816,6 +825,45 @@ def _format_match(row: dict, detail: str = "full") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Query decomposition — split complex NL into focused sub-queries
+# ---------------------------------------------------------------------------
+
+_DECOMPOSE_THRESHOLD = 3  # decompose when >3 meaningful tokens remain
+
+def _decompose_query(query: str) -> list[str] | None:
+    """Split a long NL query into overlapping pair sub-queries.
+
+    Returns None if query is short enough to search directly or
+    contains a file path (which should be searched intact).
+    Otherwise returns a list of 2-token sub-queries built from
+    overlapping pairs of the filtered token list.
+
+    Example: "error propagation from tools through middleware to client"
+      → filtered: ["error", "tools", "middleware", "client"]
+      → pairs: ["error tools", "error middleware", "tools middleware",
+                 "middleware client"]
+    """
+    # Skip decomposition for queries containing file paths
+    if "/" in query and ".py" in query:
+        return None
+    tokens = _tokenize(query)
+    words = [w for w in tokens.split() if w not in _STOP_WORDS and len(w) > 1]
+    if len(words) <= _DECOMPOSE_THRESHOLD:
+        return None
+    # Generate overlapping pairs — each token paired with its neighbors
+    # plus skip-one connections for coverage
+    pairs: list[str] = []
+    seen: set[str] = set()
+    for i in range(len(words)):
+        for j in range(i + 1, min(i + 3, len(words))):
+            pair = f"{words[i]} {words[j]}"
+            if pair not in seen:
+                seen.add(pair)
+                pairs.append(pair)
+    return pairs
+
+
+# ---------------------------------------------------------------------------
 # Search handler — layer-aware
 # ---------------------------------------------------------------------------
 
@@ -836,6 +884,43 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
     detail = arguments.get("detail", "full")
     if not query.strip():
         return {"state": "ERROR", "error": "Query is empty."}
+
+    # Query decomposition: if query has many NL tokens, split into focused
+    # sub-queries, run each, and merge results by max confidence.
+    sub_queries = _decompose_query(query)
+    if sub_queries is not None:
+        merged: dict[str, dict] = {}  # file_path → best match dict
+        for sq in sub_queries:
+            sub_result = await _handle_search(
+                {**arguments, "query": sq, "top_k": top_k},
+                context,
+            )
+            if sub_result.get("state") != "DONE":
+                continue
+            ft = sub_result.get("fact_tree")
+            if not ft:
+                continue
+            for child in ft.get("children", []):
+                fp = child.get("description", "")
+                score = child.get("value", 0.0)
+                if fp not in merged or score > merged[fp]["value"]:
+                    merged[fp] = child
+        if merged:
+            ranked = sorted(merged.values(), key=lambda c: c["value"], reverse=True)
+            children = ranked[:top_k]
+            return {
+                "state": "DONE",
+                "fact_tree": {
+                    "description": "Similarity Computation",
+                    "value": None,
+                    "children": children,
+                    "citations": [],
+                    "data_context": {"match_phase": "decomposed"},
+                },
+                "confidence": children[0]["value"],
+                "match_method": "code_search_decomposed",
+            }
+        # Decomposition found nothing — fall through to direct search
 
     org_id = context["org_id"]
     model_id = context["model_id"]
