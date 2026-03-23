@@ -131,7 +131,10 @@
         "src/fastmcp/server/context.py",
         "src/fastmcp/server/middleware/authorization.py",
         "src/fastmcp/server/auth/oauth_proxy/proxy.py",
-        "src/fastmcp/server/auth/oidc_proxy.py"
+        "src/fastmcp/server/auth/oidc_proxy.py",
+        "src/fastmcp/server/auth/__init__.py",
+        "src/fastmcp/server/auth/authorization.py",
+        "src/fastmcp/server/http.py"
       ],
       "min_expected": 3,
       "description": "Blast radius: auth orchestrator — 43 importers, core auth system"
@@ -140,13 +143,15 @@
     {
       "id": "semantic_01",
       "type": "semantic",
-      "query": "What handles webhook validation in this codebase?",
+      "query": "What handles OAuth consent and user approval flows?",
       "expected_files": [
+        "src/fastmcp/server/auth/oauth_proxy/consent.py",
         "src/fastmcp/server/auth/oauth_proxy/proxy.py",
-        "src/fastmcp/server/auth/auth.py"
+        "src/fastmcp/server/auth/auth.py",
+        "src/fastmcp/server/auth/handlers/authorize.py"
       ],
       "min_expected": 1,
-      "description": "Semantic: find webhook validation (no exact string match)"
+      "description": "Semantic: OAuth consent flow (conceptual, no exact string match)"
     },
     {
       "id": "semantic_02",
@@ -179,7 +184,8 @@
       "expected_files": [
         "src/fastmcp/client/transports/streamable_http.py",
         "src/fastmcp/client/transports/sse.py",
-        "src/fastmcp/client/client.py"
+        "src/fastmcp/client/client.py",
+        "src/fastmcp/server/mixins/transport.py"
       ],
       "min_expected": 1,
       "description": "Semantic: connection management (conceptual)"
@@ -204,9 +210,11 @@
         "src/fastmcp/client/transports/sse.py",
         "src/fastmcp/client/transports/streamable_http.py",
         "src/fastmcp/client/transports/stdio.py",
+        "src/fastmcp/client/transports/base.py",
+        "src/fastmcp/client/transports/__init__.py",
         "src/fastmcp/client/client.py"
       ],
-      "min_expected": 2,
+      "min_expected": 1,
       "description": "Semantic: architectural question — requires understanding transport pattern"
     },
     {

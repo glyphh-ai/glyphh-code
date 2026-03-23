@@ -106,9 +106,9 @@ def _get_prompt(test_type: str, with_glyphh: bool) -> str:
 def _get_budget(test_type: str) -> float:
     """Return max budget per test type."""
     return {
-        "blast_radius": 0.50,
-        "semantic": 0.50,
-    }.get(test_type, 0.50)
+        "blast_radius": 0.30,
+        "semantic": 0.30,
+    }.get(test_type, 0.30)
 
 
 def _compute_stats(results: list[dict]) -> dict:
