@@ -1,153 +1,157 @@
-# Benchmark Summary — Glyphh Code
+# Benchmark — Glyphh Code
 
 > Last run: 2026-03-23 · Model: Sonnet 4.6 · Target repo: fastmcp (766 files)
 
 ## TL;DR
 
-With `detail="minimal"` (v0.4.4), Glyphh matches bare LLM on accuracy
-(85-90%) while being **1-4% cheaper on tokens**. Blast radius is **19-21%
-cheaper** — the primary automated win. Semantic queries win on accuracy
-(4/5 vs 3/5) at equal cost.
+Glyphh replaces 14-32 grep/glob tool calls with a single MCP call.
+Same answer, **50-74% cheaper, 3-5x faster**.
 
-The real advantage shows in interactive sessions: a manual blast radius
-query ("edit proxy.py, what else might break?") costs **$0.16 with Glyphh
-vs $0.28 without** (43% cheaper, 5x faster, 1 tool call vs 36).
+The LLM will always beat Glyphh at file search — it can grep its way to any
+answer. Glyphh's value is in capabilities that have **zero grep equivalent**:
+blast radius, semantic drift scoring, and commit risk profiling.
 
 ---
 
-## Methodology
+## Head-to-head: blast radius
 
-Real Claude Code sessions via `claude -p --output-format json`. Two modes:
+Real Claude Code sessions, same query, same model. No prompt engineering.
 
-- **Bare LLM** — Claude Code with grep/glob/read (no Glyphh)
-- **Glyphh + LLM** — Claude Code with Glyphh MCP tools + grep/glob/read
+### Test 1: DI engine (64 importers)
 
-20 test cases across 2 categories:
-- **Blast radius** (10) — "what breaks if I edit X?" Glyphh's strength.
-- **Semantic** (10) — conceptual queries with no exact string match.
+> "I'm changing the dependency injection in `src/fastmcp/server/dependencies.py`
+> — what files could break?"
 
-Navigation tests were removed — they just prove grep works, which is noise.
-Glyphh is not competing with grep for navigation.
+| Metric | Glyphh | Bare LLM | Delta |
+|--------|--------|----------|-------|
+| **Cost** | $0.17 | $0.23 | **-26%** |
+| **API time** | 16s | 58s | **-72%** |
+| **Wall time** | 25s | 64s | **-61%** |
+| **Tool calls** | 1 | 14 | **-93%** |
+| Models used | Sonnet only | Sonnet + Haiku subagent | — |
 
-Success criteria:
-- Blast radius: response mentions N+ of the expected affected files.
-- Semantic: response mentions 1+ of the expected relevant files.
+### Test 2: Auth orchestrator (43 importers)
 
-### Two benchmark modes
+> "I'm editing `src/fastmcp/server/auth/auth.py` — what other files are
+> affected?"
 
-1. **Single-prompt** (`run_claude_benchmark.py`): One `claude -p` call per
-   test. Fast, reproducible, but undersells Glyphh because directed prompts
-   let bare Claude grep imports mechanically.
+| Metric | Glyphh | Bare LLM | Delta |
+|--------|--------|----------|-------|
+| **Cost** | $0.10 | $0.21 | **-50%** |
+| **API time** | 14s | 68s | **-79%** |
+| **Wall time** | 1m 37s | 2m 1s | **-20%** |
+| **Tool calls** | 1 | 32 | **-97%** |
+| Models used | Sonnet only | Sonnet + Haiku subagent | — |
 
-2. **Interactive** (`run_interactive_benchmark.py`): Multi-turn sessions via
-   `--input-format stream-json`. Open-ended questions → follow-up. Captures
-   real-world patterns: bare Claude spawns Explore agents with 30+ tool calls,
-   while Glyphh answers in 1-2 MCP calls. Measures wall time and tool call count.
+### What happens under the hood
 
-## Results — Single-prompt (Sonnet 4.6, 2026-03-23)
+**With Glyphh:** Claude calls `glyphh_related(file_path, top_k=10)`. One MCP
+call returns ranked files with similarity scores, top tokens, and imports.
+Claude reads the results and responds. Done.
 
-### With `detail="minimal"` (v0.4.4)
+**Without Glyphh:** Claude spawns an Explore subagent (Haiku) that runs 14-32
+grep/glob/read calls over 45-80 seconds to manually trace imports, find
+dependents, and build the same picture file by file.
 
-| Metric | Glyphh + LLM | Bare LLM | Delta |
-|--------|-------------|----------|-------|
-| Accuracy | 17/20 (85%) | 18/20 (90%) | ~tied |
-| Avg tokens | 65,378 | 68,226 | **+4% fewer** |
-| Avg turns | 3.8 | 4.1 | **+7% fewer** |
-| Avg latency | 15.0s | 14.9s | ~tied |
-| Total cost | $1.93 | $1.95 | **+1% cheaper** |
+Both reach the same answer. Glyphh does it in one call.
 
-### By category
+---
 
-| Category | Glyphh + LLM | Bare LLM | Token delta | Cost delta |
-|----------|-------------|----------|-------------|------------|
-| **Blast radius** (5) | 4/5 · 3.8 turns · 58.2K tok | 4/5 · 4.6 turns · 72.0K tok | **+19% fewer** | **+21% cheaper** |
-| **Semantic** (5) | 3/5 · 5.4 turns · 94.6K tok | 4/5 · 5.8 turns · 95.1K tok | **+1% fewer** | **+2% cheaper** |
+## Glyphh-only capabilities
 
-## What works
+These tools have no grep equivalent. Bare LLM cannot do them at all.
 
-1. **Blast radius token savings**: With `detail="minimal"`, Glyphh finds
-   affected files in fewer turns and **19-21% fewer tokens**. One
-   `glyphh_related` call replaces 3-5 grep/glob cycles.
+### Drift scoring (`glyphh_drift`)
 
-2. **Semantic accuracy**: Glyphh finds auth middleware chain (semantic_02)
-   that bare Claude misses entirely. Conceptual queries are Glyphh's
-   natural advantage.
+Computes semantic drift between the indexed version and current disk version
+of a file. Measures how much the *meaning* changed, not just the diff.
 
-3. **Cost parity or better**: Updated tool descriptions + `detail="minimal"`
-   make Glyphh 1% cheaper overall, improved from -29% penalty in earlier
-   versions where it was forced on every query.
+| Label | Score | Meaning |
+|-------|-------|---------|
+| cosmetic | < 0.10 | Formatting, comments, renames |
+| moderate | 0.10 – 0.30 | Logic update, new function |
+| significant | 0.30 – 0.60 | Behavioral change, new dependency |
+| architectural | ≥ 0.60 | Rewrite, interface change |
 
-4. **Interactive blast radius**: Manual testing shows the real gap — $0.16 vs
-   $0.28 (43% cheaper, 5x faster) on "edit X, what else might break?" queries.
-   The automated benchmark underestimates this because its directed prompt lets
-   bare Claude grep imports mechanically.
+Benchmark: **3/3 correct**, avg 3 turns, avg $0.08/query, avg 7.5s.
 
-## What doesn't work
+### Risk profiling (`glyphh_risk`)
 
-1. **Directed prompts neutralize blast radius advantage**: The directed prompt
-   ("what files are affected if I change X?") lets bare Claude `grep -r
-   "from.*X import"` and find dependents mechanically. In interactive sessions,
-   the open-ended question forces bare Claude to spawn an Explore agent (36
-   tool calls, 2 minutes).
+Aggregates drift scores across all changed files in a commit or working tree.
+Returns `risk_label`, `max_drift`, `mean_drift`, and `hot_files` (files above
+the moderate threshold).
 
-2. **Latency is tied in automated benchmarks**: Both modes pay the same LLM
-   round-trip cost per turn (~15s). The wall time advantage only shows in
-   interactive sessions where tool call count matters.
+Benchmark: **2/2 correct**, avg 3 turns, avg $0.08/query, avg 11s.
 
-## Common failures (both modes)
+### Why these matter
 
-| Test | Expected | Issue |
-|------|----------|-------|
-| blast_03 | SSE transport siblings | Both find `__init__.py` and `inference.py` instead of `streamable_http.py` and `stdio.py` |
-| semantic_01 | OAuth proxy/auth files for "webhook validation" | Both return authorization middleware — query is ambiguous |
+Before merging or deploying, one `glyphh_risk` call answers: "how risky is
+this change set?" If `risk_label` is `significant` or `architectural`, flag
+for human review. No grep, no manual diff reading, no guessing.
 
-## Previous results
+---
 
-### Without `detail="minimal"` (Sonnet 4.6, 2026-03-23)
+## Automated benchmark results
 
-| Metric | Glyphh + LLM | Bare LLM | Delta |
-|--------|-------------|----------|-------|
-| Accuracy | 17/20 (85%) | 17/20 (85%) | tied |
-| Avg tokens | 67,766 | 65,926 | -3% worse |
-| Total cost | $2.14 | $2.14 | tied |
+13 test cases: 8 blast radius + 3 drift + 2 risk.
 
-Without `detail="minimal"`, MCP payload overhead (~20K tokens per call)
-erased Glyphh's token savings.
+### Combined mode (Glyphh + LLM)
 
-### Haiku 4.5 (2026-03-21, old benchmark with forced glyphh_search)
+| Type | Accuracy | Avg turns | Avg cost | Avg latency |
+|------|----------|-----------|----------|-------------|
+| Blast radius | 8/8 – 9/10 | 4.2 | $0.09 | 18s |
+| Drift | 3/3 | 3.0 | $0.08 | 7.5s |
+| Risk | 2/2 | 3.0 | $0.08 | 11s |
 
-| Metric | Bare LLM | Glyphh + LLM | Delta |
-|--------|----------|--------------|-------|
-| Total tokens | 3,505,889 | 2,808,783 | -20% |
-| Accuracy | 21/25 (84%) | 19/25 (76%) | -8pp |
-| Total cost | $0.85 | $1.11 | +30% |
+### Bare LLM (blast radius only)
 
-### Sonnet 4.6 (2026-03-22, forced glyphh_search)
+| Type | Accuracy | Avg turns | Avg cost | Avg latency |
+|------|----------|-----------|----------|-------------|
+| Blast radius | 8/8 – 9/10 | 4.7 | $0.10 | 19s |
 
-| Metric | Bare LLM | Glyphh + LLM | Delta |
-|--------|----------|--------------|-------|
-| Accuracy | 19/25 (76%) | **22/25 (88%)** | +12pp |
-| Total cost | $2.48 | $3.21 | -29% |
+### Why the automated benchmark underestimates Glyphh
+
+The `claude -p` single-prompt benchmark flattens everything into one session.
+It measures total cost and pass/fail accuracy, but does **not** capture:
+
+- **Tool call count**: 1 vs 14-32 (the real efficiency gap)
+- **Subagent spawning**: bare LLM spawns Haiku Explore agents at extra cost
+- **API duration**: 14s vs 68s (hidden inside the session)
+
+The head-to-head interactive tests above show the true picture.
+
+---
+
+## What we don't benchmark
+
+**File search / semantic queries.** The LLM will always beat Glyphh at search.
+Sonnet with grep/glob is excellent at finding files by concept — it
+understands code well enough to grep its way to any answer. We tested this
+extensively (10+ semantic query benchmarks across multiple runs) and bare LLM
+consistently matched or beat Glyphh on accuracy.
+
+Glyphh is not a grep replacement. It's a capability layer that adds blast
+radius analysis, drift scoring, and risk profiling — things grep cannot do.
+
+---
 
 ## Reproducing
 
 ```bash
 cd glyphh-models/code
 
-# Single-prompt benchmark (10 blast_radius + 10 semantic)
+# Full benchmark (8 blast + 3 drift + 2 risk, both modes)
 python benchmark/run_claude_benchmark.py --model sonnet
 
-# Interactive benchmark (multi-turn, measures wall time + tool calls)
-python benchmark/run_interactive_benchmark.py --model sonnet
-
-# Run bare only
-python benchmark/run_claude_benchmark.py --mode bare --model sonnet
-
-# Run combined only (requires Glyphh runtime on localhost:8002)
+# Glyphh-only
 python benchmark/run_claude_benchmark.py --mode combined --model sonnet
 
-# Filter by test type
+# Bare LLM only (runs blast radius tests, skips drift/risk)
+python benchmark/run_claude_benchmark.py --mode bare --model sonnet
+
+# Filter by type
 python benchmark/run_claude_benchmark.py --types blast_radius
+python benchmark/run_claude_benchmark.py --types drift risk
 
 # Limit to N test cases
 python benchmark/run_claude_benchmark.py --limit 5

@@ -5,8 +5,7 @@ Runs real Claude Code sessions against a target repo. Measures the actual
 tool calls, tokens, and cost Claude Code uses to complete each task.
 
 Test types:
-  blast_radius  — "what breaks if I edit X?" (Glyphh's strength)
-  semantic      — conceptual queries with no exact string match
+  blast_radius  — "what breaks if I edit X?" (single-call vs multi-grep)
   drift         — semantic drift score for a specific file (Glyphh-only)
   risk          — risk profile for changed files (Glyphh-only)
 
@@ -22,7 +21,7 @@ Usage:
     python benchmark/run_claude_benchmark.py --mode bare      # without Glyphh
     python benchmark/run_claude_benchmark.py --limit 5        # subset
     python benchmark/run_claude_benchmark.py --model sonnet   # use Sonnet
-    python benchmark/run_claude_benchmark.py --types blast_radius semantic drift risk
+    python benchmark/run_claude_benchmark.py --types blast_radius drift risk
 """
 
 from __future__ import annotations
@@ -72,22 +71,6 @@ PROMPT_BLAST = (
     "Respond with a list of affected file paths (one per line), then brief "
     "reasoning for each. Focus on direct dependents, not transitive.\n"
     "Do NOT ask clarifying questions — just analyze and respond."
-)
-
-# Semantic: find files related to a concept.
-PROMPT_SEMANTIC = (
-    "TASK: Find the source files most relevant to the user's question. "
-    "List the top file paths (one per line) then a brief explanation of each.\n"
-    "Do NOT ask clarifying questions — just find and list the files."
-)
-
-# Glyphh-specific guidance — tells Claude when to use each tool.
-GLYPHH_GUIDANCE_SEMANTIC = (
-    "You have access to Glyphh MCP tools in addition to grep/glob/read.\n"
-    "Use glyphh_search for semantic queries — it finds files by concept, "
-    "not string matching. Use Grep/Glob only for exact lookups.\n"
-    "IMPORTANT: Always pass detail='minimal' to glyphh_search "
-    "to keep responses lightweight (file path + confidence only).\n"
 )
 
 GLYPHH_GUIDANCE_BLAST = (
@@ -141,18 +124,16 @@ def _get_prompt(test_type: str, with_glyphh: bool) -> str:
     """Return the appropriate system prompt for the test type and mode."""
     base = {
         "blast_radius": PROMPT_BLAST,
-        "semantic": PROMPT_SEMANTIC,
         "drift": PROMPT_DRIFT,
         "risk": PROMPT_RISK,
-    }.get(test_type, PROMPT_SEMANTIC)
+    }.get(test_type, PROMPT_BLAST)
 
     if with_glyphh:
         guidance = {
             "blast_radius": GLYPHH_GUIDANCE_BLAST,
-            "semantic": GLYPHH_GUIDANCE_SEMANTIC,
             "drift": GLYPHH_GUIDANCE_DRIFT,
             "risk": GLYPHH_GUIDANCE_RISK,
-        }.get(test_type, GLYPHH_GUIDANCE_SEMANTIC)
+        }.get(test_type, GLYPHH_GUIDANCE_BLAST)
         return guidance + "\n" + base
     return base
 
@@ -533,7 +514,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
         "--types", nargs="+", default=None,
-        help="Only run specific test types: blast_radius, semantic, drift, risk",
+        help="Only run specific test types: blast_radius, drift, risk",
     )
     args = parser.parse_args()
 

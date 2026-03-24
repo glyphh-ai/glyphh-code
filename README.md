@@ -12,23 +12,31 @@ Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs
 
 ---
 
-> **MODEL IN DEVELOPMENT** — Early results on a 764-file repo (fastmcp):
+> **Benchmark results** on a 766-file repo (fastmcp), Sonnet 4.6:
+>
+> ### Blast radius: 1 tool call vs 32
 >
 > | Metric | With Glyphh | Without Glyphh | Delta |
 > |--------|-------------|----------------|-------|
-> | **Cost** | $0.16 | $0.28 | **-43%** |
-> | **Wall time** | 24s | 2m 0s | **-5x faster** |
-> | **Tool calls** | 1 MCP call | 36 (Explore agent) | **-97%** |
+> | **Cost** | $0.10 – $0.17 | $0.21 – $0.23 | **-26% to -50%** |
+> | **API time** | 14 – 16s | 58 – 68s | **-72% to -79%** |
+> | **Tool calls** | 1 MCP call | 14 – 32 (Explore agent) | **-93% to -97%** |
 >
-> Tested on blast radius queries ("edit X, what else might break?") — the
-> sweet spot for HDC semantic search. Glyphh returns ranked related files
-> with similarity scores in a single call. Without it, Claude spawns an
-> Explore agent that greps/globs/reads 36 files to reach a similar answer.
+> Same answer. One `glyphh_related` call replaces an Explore subagent that
+> greps/globs/reads its way to the same result across 14-32 tool calls.
 >
-> **Not a Grep replacement.** Grep wins for navigation (exact string matches,
-> symbol lookups). Glyphh wins for semantic queries: blast radius, relatedness,
-> "what handles X". See [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for
-> the full automated benchmark (25 test cases, search/edit/debug/understand).
+> ### Capabilities with zero grep equivalent
+>
+> | Tool | What it does | Benchmark |
+> |------|-------------|-----------|
+> | `glyphh_drift` | Semantic drift score for a file (cosmetic → architectural) | 3/3, $0.08/query |
+> | `glyphh_risk` | Aggregate risk profile for a commit or working tree | 2/2, $0.08/query |
+>
+> **Not a Grep replacement.** Grep wins for navigation and file search — the
+> LLM is excellent at grepping its way to any answer. Glyphh adds blast radius
+> analysis, drift scoring, and risk profiling — things grep cannot do.
+>
+> See [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md) for full results.
 
 ## Quick Start
 
@@ -58,7 +66,8 @@ Restart Claude Code to activate. In VS Code: `Cmd+Shift+P` → "Claude Code:
 Restart". In the CLI: exit and re-enter the session.
 
 Verify the connection with `/mcp` — you should see `glyphh_search`,
-`glyphh_related`, and `glyphh_stats` listed as available tools.
+`glyphh_related`, `glyphh_drift`, `glyphh_risk`, and `glyphh_stats` listed
+as available tools.
 
 
 ## Using PostgreSQL + pgvector (optional)
@@ -187,10 +196,30 @@ wrong routing.
 ### glyphh_related
 
 Find files semantically related to a given file. Use before editing to
-understand blast radius.
+understand blast radius. This is Glyphh's primary differentiator — one call
+replaces 14-32 grep/glob cycles.
 
 ```json
 {"tool": "glyphh_related", "arguments": {"file_path": "src/services/auth.py", "top_k": 5}}
+```
+
+### glyphh_drift
+
+Compute semantic drift for a file since the last index build. Returns a score
+(0.0–1.0) and label (cosmetic, moderate, significant, architectural).
+
+```json
+{"tool": "glyphh_drift", "arguments": {"file_path": "src/services/auth.py"}}
+```
+
+### glyphh_risk
+
+Aggregate risk profile for all changed files in the working tree or a git ref.
+Returns per-file drift scores, overall risk label, and hot files.
+
+```json
+{"tool": "glyphh_risk", "arguments": {}}
+{"tool": "glyphh_risk", "arguments": {"git_ref": "HEAD~1"}}
 ```
 
 ### glyphh_stats

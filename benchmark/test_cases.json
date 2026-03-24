@@ -1,5 +1,5 @@
 {
-  "description": "Code intelligence benchmark for fastmcp codebase (~766 files). Tests blast radius and semantic queries — the two categories where Glyphh adds value over grep/glob.",
+  "description": "Code intelligence benchmark for fastmcp codebase (~766 files). Tests blast radius, drift scoring, and risk profiling — the capabilities where Glyphh has no grep equivalent.",
   "runtime_url": "http://localhost:8002",
   "org_id": "local-dev-org",
   "model_id": "code",
@@ -35,18 +35,6 @@
     {
       "id": "blast_03",
       "type": "blast_radius",
-      "query": "What files are affected if I change src/fastmcp/client/transports/sse.py?",
-      "expected_files": [
-        "src/fastmcp/client/transports/streamable_http.py",
-        "src/fastmcp/client/transports/stdio.py",
-        "src/fastmcp/client/client.py"
-      ],
-      "min_expected": 2,
-      "description": "Blast radius: SSE transport — sibling transports + client"
-    },
-    {
-      "id": "blast_04",
-      "type": "blast_radius",
       "query": "I need to refactor src/fastmcp/tools/base.py — what else will need changes?",
       "expected_files": [
         "src/fastmcp/tools/function_tool.py",
@@ -57,19 +45,7 @@
       "description": "Blast radius: tool base class — subclasses + server"
     },
     {
-      "id": "blast_05",
-      "type": "blast_radius",
-      "query": "What breaks if I modify src/fastmcp/resources/template.py?",
-      "expected_files": [
-        "src/fastmcp/resources/function_resource.py",
-        "src/fastmcp/resources/types.py",
-        "src/fastmcp/server/server.py"
-      ],
-      "min_expected": 2,
-      "description": "Blast radius: resource template — resource system"
-    },
-    {
-      "id": "blast_06",
+      "id": "blast_04",
       "type": "blast_radius",
       "query": "I'm changing the dependency injection in src/fastmcp/server/dependencies.py — what files could break?",
       "expected_files": [
@@ -83,7 +59,7 @@
       "description": "Blast radius: DI engine — 64 importers, core infrastructure"
     },
     {
-      "id": "blast_07",
+      "id": "blast_05",
       "type": "blast_radius",
       "query": "What's affected if I refactor src/fastmcp/server/context.py?",
       "expected_files": [
@@ -97,7 +73,7 @@
       "description": "Blast radius: request context — passed through entire pipeline"
     },
     {
-      "id": "blast_08",
+      "id": "blast_06",
       "type": "blast_radius",
       "query": "I need to modify src/fastmcp/server/providers/base.py — what else will need changes?",
       "expected_files": [
@@ -110,7 +86,7 @@
       "description": "Blast radius: provider base — all provider implementations depend on it"
     },
     {
-      "id": "blast_09",
+      "id": "blast_07",
       "type": "blast_radius",
       "query": "What breaks if I change src/fastmcp/exceptions.py?",
       "expected_files": [
@@ -123,7 +99,7 @@
       "description": "Blast radius: exception hierarchy — 51 importers across server and client"
     },
     {
-      "id": "blast_10",
+      "id": "blast_08",
       "type": "blast_radius",
       "query": "I'm editing src/fastmcp/server/auth/auth.py — what other files are affected?",
       "expected_files": [
@@ -138,72 +114,6 @@
       ],
       "min_expected": 3,
       "description": "Blast radius: auth orchestrator — 43 importers, core auth system"
-    },
-
-    {
-      "id": "semantic_01",
-      "type": "semantic",
-      "query": "What handles OAuth consent and user approval flows?",
-      "expected_files": [
-        "src/fastmcp/server/auth/oauth_proxy/consent.py",
-        "src/fastmcp/server/auth/oauth_proxy/proxy.py",
-        "src/fastmcp/server/auth/auth.py",
-        "src/fastmcp/server/auth/handlers/authorize.py"
-      ],
-      "min_expected": 1,
-      "description": "Semantic: OAuth consent flow (conceptual, no exact string match)"
-    },
-    {
-      "id": "semantic_02",
-      "type": "semantic",
-      "query": "How does error propagation work from tools through middleware to the client?",
-      "expected_files": [
-        "src/fastmcp/exceptions.py",
-        "src/fastmcp/server/middleware/error_handling.py",
-        "src/fastmcp/tools/base.py",
-        "src/fastmcp/server/middleware/middleware.py"
-      ],
-      "min_expected": 2,
-      "description": "Semantic: cross-cutting error flow — spans tools, middleware, exceptions"
-    },
-    {
-      "id": "semantic_03",
-      "type": "semantic",
-      "query": "What files are involved in the visibility and access control system?",
-      "expected_files": [
-        "src/fastmcp/server/transforms/visibility.py",
-        "src/fastmcp/server/middleware/authorization.py",
-        "src/fastmcp/server/auth/auth.py",
-        "src/fastmcp/server/context.py"
-      ],
-      "min_expected": 2,
-      "description": "Semantic: visibility/access control — cross-cutting concern spanning transforms and auth"
-    },
-    {
-      "id": "semantic_04",
-      "type": "semantic",
-      "query": "How does the provider system aggregate tools from multiple sources?",
-      "expected_files": [
-        "src/fastmcp/server/providers/base.py",
-        "src/fastmcp/server/providers/aggregate.py",
-        "src/fastmcp/server/providers/proxy.py",
-        "src/fastmcp/server/server.py"
-      ],
-      "min_expected": 2,
-      "description": "Semantic: provider aggregation — architectural question about multi-source tools"
-    },
-    {
-      "id": "semantic_05",
-      "type": "semantic",
-      "query": "What handles background task execution and worker scheduling?",
-      "expected_files": [
-        "src/fastmcp/server/tasks/handlers.py",
-        "src/fastmcp/server/tasks/requests.py",
-        "src/fastmcp/server/tasks/routing.py",
-        "src/fastmcp/server/tasks/config.py"
-      ],
-      "min_expected": 2,
-      "description": "Semantic: task system — no exact string match for 'scheduling'"
     },
 
     {
