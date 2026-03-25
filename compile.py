@@ -195,6 +195,36 @@ def post_to_listener(
     return resp.json()
 
 
+def wait_for_job(
+    job_id: str,
+    runtime_url: str,
+    org_id: str,
+    model_id: str,
+    token: str | None = None,
+    poll_interval: float = 0.5,
+    timeout: float = 120.0,
+) -> dict:
+    """Poll a job until it completes or errors."""
+    import requests
+
+    url = f"{runtime_url}/{org_id}/{model_id}/listener/jobs/{job_id}"
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            break
+        status = resp.json()
+        if status.get("status") in ("completed", "error"):
+            return status
+        time.sleep(poll_interval)
+
+    return {"status": "timeout", "job_id": job_id}
+
+
 
 def compile_repo(
     repo_root: str,
@@ -324,18 +354,32 @@ def compile_repo(
         }
         hierarchical_records.append(hier)
 
-    # Post to runtime in batches
+    # Post to runtime in batches — wait for each to complete before sending
+    # the next to avoid SQLite write-lock contention.
     start = time.time()
     job_ids = []
+    total_encoded = 0
+    total_failed = 0
+    num_batches = (len(hierarchical_records) + BATCH_SIZE - 1) // BATCH_SIZE
     for i in range(0, len(hierarchical_records), BATCH_SIZE):
+        batch_num = i // BATCH_SIZE + 1
         batch = hierarchical_records[i : i + BATCH_SIZE]
         result = post_to_listener(batch, runtime_url, org_id, model_id, token)
         job_id = result.get("job_id", "?")
         job_ids.append(job_id)
-        print(f"  Batch {i // BATCH_SIZE + 1}: {len(batch)} records → job {job_id}")
+        print(f"  Batch {batch_num}/{num_batches}: {len(batch)} records → job {job_id}", end="", flush=True)
+
+        # Wait for this batch to finish before sending the next
+        status = wait_for_job(job_id, runtime_url, org_id, model_id, token)
+        encoded = status.get("encoded", 0)
+        failed = status.get("failed", 0)
+        total_encoded += encoded
+        total_failed += failed
+        print(f"  ✓ {encoded} encoded, {failed} failed")
 
     elapsed = time.time() - start
-    print(f"Done: {len(records)} files indexed in {elapsed:.1f}s")
+    print(f"Done: {total_encoded}/{len(records)} files indexed in {elapsed:.1f}s"
+          + (f" ({total_failed} failed)" if total_failed else ""))
     return len(records), job_ids
 
 
