@@ -85,8 +85,8 @@ _mcp_session.headers.update({
 _jsonrpc_id = 0
 
 
-def glyphh_search(mcp_url: str, query: str, top_k: int = 5) -> dict:
-    """Call glyphh_search via JSON-RPC 2.0."""
+def _mcp_call(mcp_url: str, tool_name: str, arguments: dict) -> dict:
+    """Call an MCP tool via JSON-RPC 2.0."""
     global _jsonrpc_id
     _jsonrpc_id += 1
 
@@ -97,8 +97,8 @@ def glyphh_search(mcp_url: str, query: str, top_k: int = 5) -> dict:
             "id": _jsonrpc_id,
             "method": "tools/call",
             "params": {
-                "name": "glyphh_search",
-                "arguments": {"query": query, "top_k": top_k},
+                "name": tool_name,
+                "arguments": arguments,
             },
         },
         timeout=30,
@@ -123,6 +123,19 @@ def glyphh_search(mcp_url: str, query: str, top_k: int = 5) -> dict:
     if content and content[0].get("type") == "text":
         return json.loads(content[0]["text"])
     return result
+
+
+def glyphh_search(mcp_url: str, query: str, top_k: int = 5) -> dict:
+    """Call glyphh_search via JSON-RPC 2.0."""
+    return _mcp_call(mcp_url, "glyphh_search", {"query": query, "top_k": top_k})
+
+
+def glyphh_context(mcp_url: str, file_path: str, query: str, top_k: int = 3) -> dict:
+    """Call glyphh_context via JSON-RPC 2.0."""
+    return _mcp_call(
+        mcp_url, "glyphh_context",
+        {"file_path": file_path, "query": query, "top_k": top_k},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +205,34 @@ READ_TOOL = {
     },
 }
 
+GLYPHH_CONTEXT_TOOL = {
+    "name": "glyphh_context",
+    "description": (
+        "Read only the relevant sections of a file for a given query. "
+        "Returns matching code sections (functions, classes) with line ranges "
+        "and source code. Use INSTEAD of read when you have a specific question."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Path to the file.",
+            },
+            "query": {
+                "type": "string",
+                "description": "What you are looking for in this file.",
+            },
+            "top_k": {
+                "type": "integer",
+                "default": 3,
+                "description": "Number of sections to return.",
+            },
+        },
+        "required": ["file_path", "query"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -230,6 +271,19 @@ SYSTEM_COMBINED = (
     "4. Read the file to confirm it's correct, then answer.\n\n"
     "Glyphh gives you a starting point — use it to orient, not as the "
     "final answer. You MUST read the target file before answering."
+)
+
+SYSTEM_CONTEXT = (
+    "You are a code assistant with access to a Glyphh codebase index, "
+    "section-level file reading (glyphh_context), and standard file tools.\n\n"
+    "Complete the user's task:\n"
+    "1. Call glyphh_search to find the relevant file.\n"
+    "2. Call glyphh_context with the file path and your query to read ONLY "
+    "the relevant sections — do NOT read the full file.\n"
+    "3. If glyphh_context returns useful sections, answer from those.\n"
+    "4. Only fall back to read if glyphh_context returns no useful sections.\n\n"
+    "glyphh_context returns code sections with similarity scores and line "
+    "ranges. This saves tokens by skipping irrelevant parts of the file."
 )
 
 
@@ -614,6 +668,141 @@ def run_combined_test(
     }
 
 
+def run_context_test(
+    client: anthropic.Anthropic,
+    model: str,
+    mcp_url: str,
+    repo_root: str,
+    test_case: dict,
+) -> dict:
+    """Run a task with Glyphh search + context (section-level reading).
+
+    The LLM gets glyphh_search + glyphh_context + read fallback. It should:
+    1. Call glyphh_search to find the file
+    2. Call glyphh_context to read only relevant sections
+    3. Answer the user's question
+
+    Success = LLM found the correct file. Measures token savings from
+    section-level reading vs full file reads.
+    """
+    query = test_case["query"]
+    expected = test_case.get("expected_file") or test_case.get("target_file", "")
+    top_k_required = test_case.get("expected_in_top_k", 5)
+
+    t0 = time.perf_counter()
+    total_input = 0
+    total_output = 0
+    tool_calls = 0
+    glyphh_calls = 0
+    context_calls = 0
+    read_calls = 0
+    files_read = []
+    files_context = []
+    context_lines = 0
+    text_parts = []
+
+    messages = [{"role": "user", "content": query}]
+    tools = [GLYPHH_SEARCH_TOOL, GLYPHH_CONTEXT_TOOL, READ_TOOL, GLOB_TOOL, GREP_TOOL]
+
+    for _ in range(MAX_ITERATIONS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=SYSTEM_CONTEXT,
+            messages=messages,
+            tools=tools,
+        )
+
+        total_input += response.usage.input_tokens
+        total_output += response.usage.output_tokens
+
+        tool_results = []
+
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls += 1
+
+                if block.name == "glyphh_search":
+                    glyphh_calls += 1
+                    search_query = block.input.get("query", query)
+                    result = glyphh_search(mcp_url, search_query, top_k=top_k_required)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
+                elif block.name == "glyphh_context":
+                    context_calls += 1
+                    fp = block.input.get("file_path", "")
+                    q = block.input.get("query", query)
+                    tk = block.input.get("top_k", 3)
+                    result = glyphh_context(mcp_url, fp, q, tk)
+                    files_context.append(fp)
+                    if result.get("lines_returned"):
+                        context_lines += result["lines_returned"]
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
+                elif block.name == "read":
+                    read_calls += 1
+                    result_text = _execute_bare_tool(
+                        block.name, block.input, repo_root,
+                    )
+                    files_read.append(block.input.get("file_path", ""))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+                else:
+                    # glob/grep fallback
+                    result_text = _execute_bare_tool(
+                        block.name, block.input, repo_root,
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+        if not tool_results:
+            break
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    # Success = LLM accessed the correct file (via context or read)
+    all_files = files_context + files_read
+    found = expected in all_files
+
+    return {
+        "id": test_case["id"],
+        "type": test_case["type"],
+        "query": query,
+        "expected_file": expected,
+        "found": found,
+        "tool_calls": tool_calls,
+        "glyphh_calls": glyphh_calls,
+        "context_calls": context_calls,
+        "read_calls": read_calls,
+        "context_lines": context_lines,
+        "input_tokens": total_input,
+        "output_tokens": total_output,
+        "total_tokens": total_input + total_output,
+        "cost_usd": round(_compute_cost(total_input, total_output, model), 6),
+        "latency_ms": round(elapsed_ms, 1),
+        "files_context": files_context,
+        "files_read": files_read,
+        "response": " ".join(text_parts)[:200] if text_parts else "",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -688,8 +877,8 @@ def main():
         help="Anthropic model ID (default: claude-haiku-4-5-20251001)",
     )
     parser.add_argument(
-        "--mode", choices=["both", "glyphh", "bare", "combined", "all"], default="both",
-        help="Which mode to run. 'both' = combined + bare (default). 'all' = all three.",
+        "--mode", choices=["both", "glyphh", "bare", "combined", "context", "all"], default="both",
+        help="Which mode to run. 'both' = combined + bare. 'context' = search + section reading. 'all' = all four.",
     )
     parser.add_argument(
         "--limit", type=int, default=0,
@@ -824,6 +1013,51 @@ def main():
         print(f"  Saved: {out_path}")
         print_summary("GLYPHH + LLM FALLBACK", combined_results, args.model)
 
+    # --- Context mode (Glyphh search + context — section-level reading) ---
+    if args.mode in ("context", "all"):
+        print("Running context mode (Glyphh search + section reading)...")
+        context_results = []
+        for i, tc in enumerate(test_cases):
+            try:
+                r = run_context_test(
+                    client, args.model, mcp_url, args.repo_root, tc,
+                )
+                context_results.append(r)
+                status = "\u2713" if r["found"] else "\u2717"
+                print(f"  [{i+1}/{len(test_cases)}] {status} {tc['id']} "
+                      f"({r['glyphh_calls']}g+{r['context_calls']}c+{r['read_calls']}r calls, "
+                      f"{r['total_tokens']} tokens, "
+                      f"{r['context_lines']} context lines, "
+                      f"{r['latency_ms']:.0f}ms)")
+            except Exception as e:
+                print(f"  [{i+1}/{len(test_cases)}] ERROR {tc['id']}: {e}")
+                context_results.append({
+                    "id": tc["id"], "type": tc["type"], "query": tc["query"],
+                    "expected_file": tc.get("expected_file", tc.get("target_file", "")),
+                    "found": False, "tool_calls": 0,
+                    "glyphh_calls": 0, "context_calls": 0, "read_calls": 0,
+                    "context_lines": 0,
+                    "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                    "cost_usd": 0, "latency_ms": 0, "error": str(e),
+                })
+
+        out_path = RESULTS_DIR / f"context_{tier}_{ts}.json"
+        with open(out_path, "w") as f:
+            json.dump({"model": args.model, "mode": "context", "results": context_results}, f, indent=2)
+        print(f"  Saved: {out_path}")
+        print_summary("GLYPHH SEARCH + CONTEXT", context_results, args.model)
+
+        # Context-specific metrics
+        total_context_lines = sum(r.get("context_lines", 0) for r in context_results)
+        total_context_calls = sum(r.get("context_calls", 0) for r in context_results)
+        total_read_calls = sum(r.get("read_calls", 0) for r in context_results)
+        n = len(context_results)
+        print(f"  Context-specific metrics:")
+        print(f"    Avg context calls: {total_context_calls / n:.1f}")
+        print(f"    Avg read fallbacks: {total_read_calls / n:.1f}")
+        print(f"    Avg context lines:  {total_context_lines / n:.0f}")
+        print()
+
     # --- Head-to-head: Combined vs Bare ---
     if args.mode == "both":
         print("=" * 60)
@@ -856,38 +1090,46 @@ def main():
 
     if args.mode == "all":
         print("=" * 60)
-        print("  THREE-WAY COMPARISON")
+        print("  FOUR-WAY COMPARISON")
         print("=" * 60)
 
         g = glyphh_results
         b = bare_results
         c = combined_results
+        x = context_results
         n = len(test_cases)
 
         g_found = sum(1 for r in g if r["found"])
         b_found = sum(1 for r in b if r["found"])
         c_found = sum(1 for r in c if r["found"])
+        x_found = sum(1 for r in x if r["found"])
         g_tokens = sum(r["total_tokens"] for r in g)
         b_tokens = sum(r["total_tokens"] for r in b)
         c_tokens = sum(r["total_tokens"] for r in c)
+        x_tokens = sum(r["total_tokens"] for r in x)
         g_cost = sum(r["cost_usd"] for r in g)
         b_cost = sum(r["cost_usd"] for r in b)
         c_cost = sum(r["cost_usd"] for r in c)
+        x_cost = sum(r["cost_usd"] for r in x)
         g_calls = sum(r["tool_calls"] for r in g)
         b_calls = sum(r["tool_calls"] for r in b)
         c_calls = sum(r["tool_calls"] for r in c)
+        x_calls = sum(r["tool_calls"] for r in x)
 
-        print(f"  {'':20s} {'Glyphh':>10s} {'Combined':>10s} {'Bare LLM':>10s}")
-        print(f"  {'':20s} {'(HDC only)':>10s} {'(G + LLM)':>10s} {'(no Glyphh)':>10s}")
-        print(f"  {'-'*20} {'-'*10} {'-'*10} {'-'*10}")
-        print(f"  {'Accuracy':20s} {g_found:>5d}/{n:<4d} {c_found:>5d}/{n:<4d} {b_found:>5d}/{n:<4d}")
-        print(f"  {'Avg tokens':20s} {g_tokens/n:>10.0f} {c_tokens/n:>10.0f} {b_tokens/n:>10.0f}")
-        print(f"  {'Avg tool calls':20s} {g_calls/n:>10.1f} {c_calls/n:>10.1f} {b_calls/n:>10.1f}")
-        print(f"  {'Total cost':20s} ${g_cost:>9.4f} ${c_cost:>9.4f} ${b_cost:>9.4f}")
+        print(f"  {'':20s} {'Glyphh':>10s} {'Combined':>10s} {'Context':>10s} {'Bare LLM':>10s}")
+        print(f"  {'':20s} {'(HDC only)':>10s} {'(G + LLM)':>10s} {'(G + Ctx)':>10s} {'(no Glyphh)':>10s}")
+        print(f"  {'-'*20} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
+        print(f"  {'Accuracy':20s} {g_found:>5d}/{n:<4d} {c_found:>5d}/{n:<4d} {x_found:>5d}/{n:<4d} {b_found:>5d}/{n:<4d}")
+        print(f"  {'Avg tokens':20s} {g_tokens/n:>10.0f} {c_tokens/n:>10.0f} {x_tokens/n:>10.0f} {b_tokens/n:>10.0f}")
+        print(f"  {'Avg tool calls':20s} {g_calls/n:>10.1f} {c_calls/n:>10.1f} {x_calls/n:>10.1f} {b_calls/n:>10.1f}")
+        print(f"  {'Total cost':20s} ${g_cost:>9.4f} ${c_cost:>9.4f} ${x_cost:>9.4f} ${b_cost:>9.4f}")
         print()
-        savings = (1 - c_tokens / max(b_tokens, 1)) * 100
-        print(f"  Combined vs Bare: {savings:.0f}% token savings, "
-              f"{c_found - b_found:+d} accuracy delta")
+        cb_savings = (1 - c_tokens / max(b_tokens, 1)) * 100
+        xb_savings = (1 - x_tokens / max(b_tokens, 1)) * 100
+        xc_savings = (1 - x_tokens / max(c_tokens, 1)) * 100
+        print(f"  Combined vs Bare:  {cb_savings:.0f}% token savings, {c_found - b_found:+d} accuracy delta")
+        print(f"  Context vs Bare:   {xb_savings:.0f}% token savings, {x_found - b_found:+d} accuracy delta")
+        print(f"  Context vs Combined: {xc_savings:.0f}% token savings, {x_found - c_found:+d} accuracy delta")
         print()
 
 

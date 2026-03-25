@@ -228,7 +228,7 @@ _DEF_PATTERNS = [
     # Rust: fn name, struct Name, enum Name, impl Name
     re.compile(r"^(?:pub\s+)?(?:fn|struct|enum|trait|impl)\s+(\w+)", re.MULTILINE),
     # Java/C#: public class Name, void methodName
-    re.compile(r"^(?:public|private|protected)?\s*(?:static\s+)?(?:class|interface|enum)\s+(\w+)", re.MULTILINE),
+    re.compile(r"^(?:public|private|protected)?[ \t]*(?:static\s+)?(?:class|interface|enum)\s+(\w+)", re.MULTILINE),
     # C/C++: return_type function_name(
     re.compile(r"^(?:\w+\s+)+(\w+)\s*\(", re.MULTILINE),
     # Ruby: def name, class Name, module Name
@@ -420,11 +420,11 @@ def extract_sections(content: str, ext: str) -> list[dict]:
         end_line    — 1-based end line (inclusive)
         content     — section source code
     """
+    if not content.strip():
+        return []
+
     lines = content.split("\n")
     total_lines = len(lines)
-
-    if total_lines == 0:
-        return []
 
     # Try tree-sitter
     parser = _get_parser(ext)
@@ -487,13 +487,15 @@ def _extract_sections_regex(content: str, lines: list[str],
     """Fallback section extraction using definition-start regex patterns."""
     def_starts: list[tuple[int, str]] = []
     seen_lines: set[int] = set()
+    seen_names: set[str] = set()
 
     for pat in _DEF_PATTERNS:
         for m in pat.finditer(content):
             line_num = content[:m.start()].count("\n") + 1
             name = m.group(1)
-            if line_num not in seen_lines:
+            if line_num not in seen_lines and name not in seen_names:
                 seen_lines.add(line_num)
+                seen_names.add(name)
                 def_starts.append((line_num, name))
 
     def_starts.sort(key=lambda x: x[0])

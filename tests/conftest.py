@@ -23,6 +23,7 @@ from encoder import (
     _extract_identifiers,
     _top_tokens,
 )
+from ast_extract import extract_sections
 
 
 @pytest.fixture

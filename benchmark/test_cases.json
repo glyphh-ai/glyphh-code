@@ -193,6 +193,46 @@
       "query": "How are tools registered and dispatched?",
       "target_file": "src/fastmcp/tools/base.py",
       "description": "Understand: tool dispatch system"
+    },
+    {
+      "id": "context_01",
+      "type": "context",
+      "query": "How does the rate limiter check if a request exceeds the limit?",
+      "target_file": "src/fastmcp/server/middleware/rate_limiting.py",
+      "expected_section": "check_rate_limit",
+      "description": "Context: find specific function in rate limiter"
+    },
+    {
+      "id": "context_02",
+      "type": "context",
+      "query": "What happens when an SSE connection is first established?",
+      "target_file": "src/fastmcp/client/transports/sse.py",
+      "expected_section": "connect",
+      "description": "Context: find connection setup in SSE transport"
+    },
+    {
+      "id": "context_03",
+      "type": "context",
+      "query": "How does the authorization middleware validate bearer tokens?",
+      "target_file": "src/fastmcp/server/middleware/authorization.py",
+      "expected_section": "validate_token",
+      "description": "Context: find token validation logic"
+    },
+    {
+      "id": "context_04",
+      "type": "context",
+      "query": "How are function arguments parsed from the tool call input?",
+      "target_file": "src/fastmcp/tools/function_parsing.py",
+      "expected_section": "parse_arguments",
+      "description": "Context: find argument parser function"
+    },
+    {
+      "id": "context_05",
+      "type": "context",
+      "query": "How does the caching middleware decide if a response should be cached?",
+      "target_file": "src/fastmcp/server/middleware/caching.py",
+      "expected_section": "should_cache",
+      "description": "Context: find cache decision logic"
     }
   ]
 }

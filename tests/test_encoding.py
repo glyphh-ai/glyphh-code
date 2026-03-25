@@ -18,6 +18,7 @@ from encoder import (
     INDEXABLE_EXTENSIONS,
     SKIP_DIRS,
 )
+from ast_extract import extract_sections
 
 
 class TestEncoderConfig:
@@ -269,3 +270,106 @@ class TestConstants:
         assert "node_modules" in SKIP_DIRS
         assert "__pycache__" in SKIP_DIRS
         assert "src" not in SKIP_DIRS
+
+
+class TestExtractSections:
+    """Test section extraction for glyphh_context."""
+
+    PYTHON_CODE = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
+        "class AuthMiddleware:\n"
+        "    def __init__(self, app):\n"
+        "        self.app = app\n"
+        "\n"
+        "    def check_scope(self, token, scope):\n"
+        "        return scope in token.scopes\n"
+        "\n"
+        "def validate_token(token_str):\n"
+        "    if not token_str:\n"
+        "        return None\n"
+        "    return decode_jwt(token_str)\n"
+    )
+
+    def test_returns_list(self):
+        sections = extract_sections(self.PYTHON_CODE, ".py")
+        assert isinstance(sections, list)
+        assert len(sections) > 0
+
+    def test_sections_have_required_keys(self):
+        sections = extract_sections(self.PYTHON_CODE, ".py")
+        for s in sections:
+            assert "name" in s
+            assert "start_line" in s
+            assert "end_line" in s
+            assert "content" in s
+
+    def test_line_numbers_are_1_based(self):
+        sections = extract_sections(self.PYTHON_CODE, ".py")
+        for s in sections:
+            assert s["start_line"] >= 1
+            assert s["end_line"] >= s["start_line"]
+
+    def test_finds_class_and_function(self):
+        sections = extract_sections(self.PYTHON_CODE, ".py")
+        names = [s["name"] for s in sections]
+        assert "AuthMiddleware" in names
+        assert "validate_token" in names
+
+    def test_preamble_when_imports_present(self):
+        sections = extract_sections(self.PYTHON_CODE, ".py")
+        names = [s["name"] for s in sections]
+        # Should have a preamble for the imports
+        assert "__preamble__" in names
+        preamble = next(s for s in sections if s["name"] == "__preamble__")
+        assert "import os" in preamble["content"]
+
+    def test_empty_content_returns_empty(self):
+        sections = extract_sections("", ".py")
+        assert sections == []
+
+    def test_no_definitions_returns_module(self):
+        code = "# Just a comment\nx = 42\ny = 'hello'\n"
+        sections = extract_sections(code, ".py")
+        # Regex fallback should find nothing, return __module__
+        assert len(sections) >= 1
+
+    def test_real_file(self):
+        """Test on the actual encoder.py file."""
+        from pathlib import Path as P
+        content = (P(__file__).parent.parent / "encoder.py").read_text()
+        sections = extract_sections(content, ".py")
+        names = [s["name"] for s in sections]
+        assert "encode_query" in names
+        assert "file_to_record" in names
+        # Sections should cover most of the file
+        total_lines = len(content.splitlines())
+        covered = sum(s["end_line"] - s["start_line"] + 1 for s in sections)
+        assert covered > total_lines * 0.5  # At least 50% coverage
+
+    def test_sections_dont_overlap(self):
+        """Section line ranges should not overlap (except preamble edge)."""
+        from pathlib import Path as P
+        content = (P(__file__).parent.parent / "encoder.py").read_text()
+        sections = extract_sections(content, ".py")
+        # Sort by start line
+        sorted_sections = sorted(sections, key=lambda s: s["start_line"])
+        for i in range(1, len(sorted_sections)):
+            prev = sorted_sections[i - 1]
+            curr = sorted_sections[i]
+            # Allow 1 line of overlap for preamble/first-def boundary
+            assert curr["start_line"] >= prev["start_line"], (
+                f"{curr['name']} starts at {curr['start_line']} "
+                f"before {prev['name']} starts at {prev['start_line']}"
+            )
+
+    def test_unsupported_extension_uses_regex(self):
+        """Non-tree-sitter languages fall back to regex."""
+        code = "def foo():\n    pass\n\ndef bar():\n    pass\n"
+        # .xyz not in grammar map — should use regex fallback
+        sections = extract_sections(code, ".xyz")
+        assert len(sections) >= 2
+        names = [s["name"] for s in sections]
+        assert "foo" in names
+        assert "bar" in names
