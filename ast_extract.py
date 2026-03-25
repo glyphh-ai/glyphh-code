@@ -401,3 +401,136 @@ def extract_file_symbols(file_path: str, content: str) -> dict:
         "docstring": docstring.strip(),
         "file_role": _detect_role(file_path),
     }
+
+
+# ---------------------------------------------------------------------------
+# Section extraction — top-level definitions with line ranges
+# ---------------------------------------------------------------------------
+
+def extract_sections(content: str, ext: str) -> list[dict]:
+    """Extract top-level code sections with line ranges.
+
+    Uses tree-sitter to identify top-level definitions (functions, classes,
+    etc.) and returns each as a section with its source code and line range.
+    Falls back to regex for unsupported languages.
+
+    Returns list of dicts:
+        name        — section identifier (function/class name, or "__preamble__")
+        start_line  — 1-based start line (inclusive)
+        end_line    — 1-based end line (inclusive)
+        content     — section source code
+    """
+    lines = content.split("\n")
+    total_lines = len(lines)
+
+    if total_lines == 0:
+        return []
+
+    # Try tree-sitter
+    parser = _get_parser(ext)
+    if parser is not None:
+        sections = _extract_sections_ts(parser, content, lines, total_lines)
+        if sections:
+            return sections
+
+    # Fallback to regex
+    return _extract_sections_regex(content, lines, total_lines)
+
+
+def _extract_sections_ts(parser, content: str, lines: list[str],
+                         total_lines: int) -> list[dict]:
+    """Extract sections using tree-sitter AST."""
+    tree = parser.parse(content.encode("utf-8"))
+    root = tree.root_node
+
+    definitions = []
+    for node in root.children:
+        if node.type in _DEFINE_TYPES:
+            name = _extract_name_from_node(node)
+            if not name:
+                name = f"__anon_{node.start_point[0]}"
+            start = node.start_point[0] + 1   # 1-based
+            end = node.end_point[0] + 1        # 1-based
+            definitions.append((name, start, end))
+
+    if not definitions:
+        return []
+
+    sections = []
+
+    # Preamble: imports, module docstring, module-level code before first def
+    first_def_line = definitions[0][1]
+    if first_def_line > 1:
+        preamble = "\n".join(lines[:first_def_line - 1]).strip()
+        if preamble and first_def_line > 3:
+            sections.append({
+                "name": "__preamble__",
+                "start_line": 1,
+                "end_line": first_def_line - 1,
+                "content": preamble,
+            })
+
+    # Each definition as a section
+    for name, start, end in definitions:
+        sections.append({
+            "name": name,
+            "start_line": start,
+            "end_line": end,
+            "content": "\n".join(lines[start - 1:end]),
+        })
+
+    return sections
+
+
+def _extract_sections_regex(content: str, lines: list[str],
+                            total_lines: int) -> list[dict]:
+    """Fallback section extraction using definition-start regex patterns."""
+    def_starts: list[tuple[int, str]] = []
+    seen_lines: set[int] = set()
+
+    for pat in _DEF_PATTERNS:
+        for m in pat.finditer(content):
+            line_num = content[:m.start()].count("\n") + 1
+            name = m.group(1)
+            if line_num not in seen_lines:
+                seen_lines.add(line_num)
+                def_starts.append((line_num, name))
+
+    def_starts.sort(key=lambda x: x[0])
+
+    if not def_starts:
+        # No definitions — return whole file as one section
+        return [{
+            "name": "__module__",
+            "start_line": 1,
+            "end_line": total_lines,
+            "content": content,
+        }]
+
+    sections = []
+
+    # Preamble
+    if def_starts[0][0] > 3:
+        preamble = "\n".join(lines[:def_starts[0][0] - 1]).strip()
+        if preamble:
+            sections.append({
+                "name": "__preamble__",
+                "start_line": 1,
+                "end_line": def_starts[0][0] - 1,
+                "content": preamble,
+            })
+
+    # Each definition runs until the next one starts (or EOF)
+    for i, (line_num, name) in enumerate(def_starts):
+        if i + 1 < len(def_starts):
+            end_line = def_starts[i + 1][0] - 1
+        else:
+            end_line = total_lines
+        sections.append({
+            "name": name,
+            "start_line": line_num,
+            "end_line": end_line,
+            "content": "\n".join(lines[line_num - 1:end_line]),
+        })
+
+    return sections

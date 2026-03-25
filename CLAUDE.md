@@ -9,6 +9,7 @@ Follow these rules in every session without exception.
 
 glyphh_search   find files by natural language query
 glyphh_related  find files related to a given file
+glyphh_context  read only the relevant sections of a file for a query
 glyphh_stats    index statistics
 
 
@@ -16,6 +17,9 @@ glyphh_stats    index statistics
 
 ALWAYS call glyphh_search before reading any file.
 ALWAYS call glyphh_related before editing a file.
+Use glyphh_context INSTEAD of Read when you have a specific question
+about a file. It returns only the matching code sections with line ranges.
+Only fall back to Read when you need the full file.
 NEVER use Grep to find files. Use glyphh_search instead.
 NEVER use Glob to find files. Use glyphh_search instead.
 NEVER use the Agent tool to explore the codebase. Use glyphh_search instead.
@@ -93,3 +97,16 @@ glyphh_related returns:
     similarity  0.0 to 1.0
     top_tokens  dominant concepts
     imports     dependencies
+
+glyphh_context returns:
+
+  state           DONE
+  file            the queried file path
+  sections        list of matching sections (top-k by similarity)
+    name          function/class name (or __preamble__)
+    start_line    1-based start line
+    end_line      1-based end line (inclusive)
+    similarity    0.0 to 1.0
+    content       section source code
+  total_lines     total lines in the file
+  lines_returned  lines across all returned sections
