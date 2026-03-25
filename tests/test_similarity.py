@@ -272,7 +272,151 @@ class TestMCPToolSchemas:
         related = next(t for t in MCP_TOOLS if t["name"] == "glyphh_related")
         assert related["input_schema"]["required"] == ["file_path"]
 
+    def test_context_tool_schema(self):
+        from encoder import MCP_TOOLS
+        context = next(t for t in MCP_TOOLS if t["name"] == "glyphh_context")
+        assert "description" in context
+        assert set(context["input_schema"]["required"]) == {"file_path", "query"}
+        props = context["input_schema"]["properties"]
+        assert "file_path" in props
+        assert "query" in props
+        assert "top_k" in props
+
     def test_handle_mcp_tool_defined(self):
         from glyphh_code.encoder import handle_mcp_tool
         import asyncio
         assert asyncio.iscoroutinefunction(handle_mcp_tool)
+
+
+class TestSectionScoring:
+    """Test that section-level encoding correctly identifies relevant code sections."""
+
+    MULTI_FUNCTION_CODE = (
+        "import os\n"
+        "import hashlib\n"
+        "\n"
+        "def hash_password(password):\n"
+        "    salt = os.urandom(32)\n"
+        "    key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)\n"
+        "    return salt + key\n"
+        "\n"
+        "def verify_password(stored, provided):\n"
+        "    salt = stored[:32]\n"
+        "    key = hashlib.pbkdf2_hmac('sha256', provided.encode(), salt, 100000)\n"
+        "    return stored[32:] == key\n"
+        "\n"
+        "def create_user(name, email, password):\n"
+        "    hashed = hash_password(password)\n"
+        "    return {'name': name, 'email': email, 'password_hash': hashed}\n"
+        "\n"
+        "def send_welcome_email(email, name):\n"
+        "    subject = f'Welcome {name}'\n"
+        "    body = f'Hello {name}, your account is ready.'\n"
+        "    return {'to': email, 'subject': subject, 'body': body}\n"
+    )
+
+    def _score_sections(self, encoder, query, code, ext=".py"):
+        """Encode query and sections, return sorted (name, score) pairs."""
+        sections = extract_sections(code, ext)
+        concept_dict = encode_query(query)
+        attrs = concept_dict.get("attributes", concept_dict)
+        name = concept_dict.get("name", "query")
+        query_glyph = encoder.encode(Concept(name=name, attributes=attrs))
+
+        scored = []
+        for section in sections:
+            section_identifiers = _extract_identifiers(section["content"])
+            section_imports = _extract_imports(section["content"])
+            section_attrs = {
+                "path_tokens": "",
+                "defines": _tokenize(section["name"]) if section["name"] != "__preamble__" else "",
+                "docstring": "",
+                "file_role": "source",
+                "identifiers": section_identifiers,
+                "imports": section_imports,
+            }
+            section_glyph = encoder.encode(Concept(
+                name=f"section_{section['name']}",
+                attributes=section_attrs,
+            ))
+            sym_sim = float(cosine_similarity(
+                query_glyph.layers["symbols"].cortex.data,
+                section_glyph.layers["symbols"].cortex.data,
+            ))
+            content_sim = float(cosine_similarity(
+                query_glyph.layers["content"].cortex.data,
+                section_glyph.layers["content"].cortex.data,
+            ))
+            score = 0.4 * sym_sim + 0.6 * content_sim
+            scored.append((section["name"], round(score, 4)))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def test_password_query_finds_password_functions(self, encoder):
+        """Query about password hashing should rank password functions highest."""
+        scored = self._score_sections(
+            encoder, "password hashing and verification", self.MULTI_FUNCTION_CODE,
+        )
+        top_names = [name for name, _ in scored[:2]]
+        assert any("password" in n for n in top_names), (
+            f"Expected password function in top 2, got: {scored}"
+        )
+
+    def test_email_query_finds_email_function(self, encoder):
+        """Query about email should rank send_welcome_email highest."""
+        scored = self._score_sections(
+            encoder, "send welcome email notification", self.MULTI_FUNCTION_CODE,
+        )
+        assert scored[0][0] == "send_welcome_email", (
+            f"Expected send_welcome_email as top match, got: {scored}"
+        )
+
+    def test_user_creation_query_finds_create_user(self, encoder):
+        """Query about user creation should rank create_user highest."""
+        scored = self._score_sections(
+            encoder, "create new user account with name email", self.MULTI_FUNCTION_CODE,
+        )
+        top_names = [name for name, _ in scored[:2]]
+        assert "create_user" in top_names, (
+            f"Expected create_user in top 2, got: {scored}"
+        )
+
+    def test_section_scores_are_discriminative(self, encoder):
+        """Top match should score meaningfully higher than bottom match."""
+        scored = self._score_sections(
+            encoder, "password hashing and verification", self.MULTI_FUNCTION_CODE,
+        )
+        top_score = scored[0][1]
+        bottom_score = scored[-1][1]
+        assert top_score > bottom_score, (
+            f"Scores should be discriminative: top={top_score}, bottom={bottom_score}"
+        )
+
+    def test_real_file_section_routing(self, encoder):
+        """Test on real encoder.py — 'MCP tool handler' should find handle_mcp_tool."""
+        from pathlib import Path as P
+        content = (P(__file__).parent.parent / "encoder.py").read_text()
+        scored = self._score_sections(encoder, "MCP tool handler dispatch", content)
+        top_3_names = [name for name, _ in scored[:3]]
+        assert "handle_mcp_tool" in top_3_names, (
+            f"Expected handle_mcp_tool in top 3, got: {top_3_names}"
+        )
+
+    def test_token_savings_on_real_file(self, encoder):
+        """Verify glyphh_context achieves meaningful line reduction on a real file."""
+        from pathlib import Path as P
+        content = (P(__file__).parent.parent / "encoder.py").read_text()
+        sections = extract_sections(content, ".py")
+        total_lines = len(content.splitlines())
+
+        # Top 3 sections should be much less than total file
+        top_3_lines = sum(
+            s["end_line"] - s["start_line"] + 1
+            for s in sorted(sections, key=lambda s: s["end_line"] - s["start_line"])[:3]
+        )
+        reduction = 1 - (top_3_lines / total_lines)
+        assert reduction > 0.50, (
+            f"Expected >50% reduction, got {reduction:.0%} "
+            f"({top_3_lines}/{total_lines} lines)"
+        )

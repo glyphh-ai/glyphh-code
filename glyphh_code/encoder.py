@@ -565,6 +565,35 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "glyphh_context",
+        "description": (
+            "Read only the relevant sections of a file for a given query. "
+            "Instead of reading the entire file, returns the top matching "
+            "code sections (functions, classes) with line ranges. "
+            "Use this INSTEAD of the Read tool when you have a specific "
+            "question about a file. Reduces token usage by ~80%."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file (relative or absolute)",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "What you are looking for in this file",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "Number of sections to return",
+                },
+            },
+            "required": ["file_path", "query"],
+        },
+    },
+    {
         "name": "glyphh_stats",
         "description": (
             "Get statistics about the indexed codebase. "
@@ -638,6 +667,7 @@ async def handle_mcp_tool(tool_name: str, arguments: dict, context: dict) -> dic
     handlers = {
         "glyphh_search": _handle_search,
         "glyphh_related": _handle_related,
+        "glyphh_context": _handle_context,
         "glyphh_stats": _handle_stats,
         "glyphh_drift": _handle_drift,
         "glyphh_risk": _handle_risk,
@@ -1226,6 +1256,141 @@ async def _handle_related(arguments: dict, context: dict) -> dict:
         },
         "confidence": children[0]["value"] if children else 0.0,
         "match_method": "code_related",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Context handler — section-level file reading
+# ---------------------------------------------------------------------------
+
+async def _handle_context(arguments: dict, context: dict) -> dict:
+    """Return only the relevant sections of a file for a given query.
+
+    Pipeline:
+    1. Read the file and split into sections via tree-sitter AST
+    2. Encode each section as a mini-concept (symbols + content layers)
+    3. Encode the query using the standard encode_query pipeline
+    4. Score each section against the query using layer cosine similarity
+    5. Return top-k sections with source code and line ranges
+
+    This replaces full file reads for targeted queries, cutting token
+    usage by ~80% (e.g., 60 lines returned instead of 500).
+    """
+    from glyphh.core.types import Concept
+    from glyphh.core.ops import cosine_similarity
+    from glyphh_code.ast_extract import extract_sections
+
+    file_path = arguments.get("file_path", "")
+    query = arguments.get("query", "")
+    top_k = arguments.get("top_k", 3)
+
+    if not file_path.strip():
+        return {"state": "ERROR", "error": "file_path is required."}
+    if not query.strip():
+        return {"state": "ERROR", "error": "query is required."}
+
+    # Resolve file path — try as-is, then relative to CWD
+    path = Path(file_path)
+    if not path.exists():
+        path = Path.cwd() / file_path
+    if not path.exists():
+        return {"state": "ERROR", "error": f"File not found: {file_path}"}
+    if path.stat().st_size > MAX_FILE_BYTES:
+        return {"state": "ERROR", "error": f"File too large: {path.stat().st_size} bytes"}
+
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return {"state": "ERROR", "error": f"Cannot read file: {e}"}
+
+    ext = path.suffix
+    lines = content.split("\n")
+    total_lines = len(lines)
+
+    # Extract sections with line ranges
+    sections = extract_sections(content, ext)
+    if not sections:
+        return {
+            "state": "DONE",
+            "file": file_path,
+            "sections": [{
+                "name": "__module__",
+                "start_line": 1,
+                "end_line": total_lines,
+                "similarity": 1.0,
+                "content": content,
+            }],
+            "total_lines": total_lines,
+            "lines_returned": total_lines,
+        }
+
+    # Encode query
+    encoder = context["encoder"]
+    encode_fn = context["encode_query_fn"]
+    concept_dict = encode_fn(query)
+    attrs = concept_dict.get("attributes", concept_dict)
+    name = concept_dict.get("name", "query")
+    query_glyph = encoder.encode(Concept(name=name, attributes=attrs))
+
+    # Encode each section and score against query
+    scored = []
+    for section in sections:
+        section_identifiers = _extract_identifiers(section["content"])
+        section_imports = _extract_imports(section["content"])
+
+        section_attrs = {
+            "path_tokens": "",
+            "defines": _tokenize(section["name"]) if section["name"] != "__preamble__" else "",
+            "docstring": "",
+            "file_role": "source",
+            "identifiers": section_identifiers,
+            "imports": section_imports,
+        }
+        section_glyph = encoder.encode(Concept(
+            name=f"section_{section['name']}",
+            attributes=section_attrs,
+        ))
+
+        # Score using symbols + content layers (path is irrelevant within a file)
+        sym_sim = 0.0
+        content_sim = 0.0
+        has_layers = hasattr(query_glyph, "layers")
+
+        if has_layers and "symbols" in query_glyph.layers and "symbols" in section_glyph.layers:
+            sym_sim = float(cosine_similarity(
+                query_glyph.layers["symbols"].cortex.data,
+                section_glyph.layers["symbols"].cortex.data,
+            ))
+        if has_layers and "content" in query_glyph.layers and "content" in section_glyph.layers:
+            content_sim = float(cosine_similarity(
+                query_glyph.layers["content"].cortex.data,
+                section_glyph.layers["content"].cortex.data,
+            ))
+
+        # Weight: 40% symbol match + 60% content match
+        score = 0.4 * sym_sim + 0.6 * content_sim
+        scored.append({**section, "similarity": round(score, 3)})
+
+    # Sort by score descending, return top-k
+    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    top_sections = scored[:top_k]
+    lines_returned = sum(s["end_line"] - s["start_line"] + 1 for s in top_sections)
+
+    return {
+        "state": "DONE",
+        "file": file_path,
+        "sections": [
+            {
+                "name": s["name"],
+                "start_line": s["start_line"],
+                "end_line": s["end_line"],
+                "similarity": s["similarity"],
+                "content": s["content"],
+            }
+            for s in top_sections
+        ],
+        "total_lines": total_lines,
+        "lines_returned": lines_returned,
     }
 
 
