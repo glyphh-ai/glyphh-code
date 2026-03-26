@@ -239,9 +239,10 @@ def _deploy_model(runtime_url: str) -> bool:
 
 
 def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = False):
-    """Configure Claude Code: MCP server, hooks, permissions.
+    """Configure Claude Code: MCP server, hooks, permissions, rules.
 
-    Does NOT touch the user's CLAUDE.md. Glyphh tool usage is enforced
+    Does NOT touch the user's CLAUDE.md. Behavioral guidance is written to
+    .claude/rules/glyphh.md (separate file, no conflicts). Enforcement is
     via a PreToolUse search gate hook that blocks Grep/Glob/Bash(grep|find)
     until glyphh_search has been called at least once per session.
     """
@@ -366,7 +367,29 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
     settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     click.secho("  ✓ Hooks and permissions configured", fg=theme.SUCCESS)
 
-    # 4. Write .glyphh/manifest.yaml so `model` commands resolve model_id
+    # 4. Write .claude/rules/glyphh.md — behavioral guidance for the LLM
+    rules_dir = claude_dir / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    rules_file = rules_dir / "glyphh.md"
+    rules_file.write_text(
+        "# Glyphh Code Intelligence\n"
+        "\n"
+        "This project has a Glyphh semantic index.\n"
+        "Use glyphh MCP tools for codebase search.\n"
+        "\n"
+        "## Rules\n"
+        "\n"
+        "ALWAYS call glyphh_search before using Grep, Glob, or the Agent tool.\n"
+        "NEVER use the Agent tool to explore the codebase. Use glyphh_search.\n"
+        "NEVER scan directories or read multiple files speculatively.\n"
+        "Use glyphh_context INSTEAD of Read when you have a specific question\n"
+        "about a file. It returns only the matching sections, not the full file.\n"
+        "Only fall back to Read when you need the complete file.\n"
+        "Call glyphh_related before editing any file to understand blast radius.\n"
+    )
+    click.secho("  ✓ Navigation rules written to .claude/rules/glyphh.md", fg=theme.SUCCESS)
+
+    # 6. Write .glyphh/manifest.yaml so `model` commands resolve model_id
     glyphh_dir = repo / ".glyphh"
     glyphh_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = glyphh_dir / "manifest.yaml"
@@ -376,7 +399,7 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
         "name: Glyphh Code\n"
     )
 
-    # 5. Add .glyphh/ to .gitignore
+    # 7. Add .glyphh/ to .gitignore
     gitignore = repo / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
