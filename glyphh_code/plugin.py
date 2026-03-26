@@ -494,6 +494,22 @@ def _cmd_init(args: str):
     click.echo()
 
 
+def _cmd_deploy(args: str):
+    """code deploy — redeploy the model without re-encoding."""
+    runtime_url = _start_dev_server()
+    if not runtime_url:
+        return
+
+    click.secho("  Deploying model...", fg=theme.TEXT)
+    if _deploy_model(runtime_url):
+        click.secho("  Model deployed.", fg=theme.SUCCESS)
+        click.echo()
+        click.secho("  Restart Claude Code to activate.", fg=theme.MUTED)
+        click.secho("  VS Code: Cmd+Shift+P → 'Claude Code: Restart'", fg=theme.TEXT_DIM)
+    else:
+        click.secho("  Deploy failed.", fg=theme.ERROR)
+
+
 def _cmd_compile(args: str):
     """code compile [path] — recompile the index."""
     runtime_url = _start_dev_server()
@@ -547,6 +563,7 @@ def handle_code(func: str | None, args: str = ""):
     """Route code subcommands from the Glyphh shell."""
     commands = {
         "init": _cmd_init,
+        "deploy": _cmd_deploy,
         "compile": _cmd_compile,
         "status": _cmd_status,
         "stop": _cmd_stop,
@@ -561,12 +578,12 @@ def handle_code(func: str | None, args: str = ""):
         handler(args)
     else:
         click.secho(f"  Unknown: code {func}", fg=theme.WARNING)
-        click.secho("  Available: init, compile, status, stop", fg=theme.TEXT_DIM)
+        click.secho("  Available: init, deploy, compile, status, stop", fg=theme.TEXT_DIM)
 
 
 def register():
     """Entry point registration — called by runtime shell plugin discovery."""
     return {
         "handler": handle_code,
-        "subcommands": ["init", "compile", "status", "stop"],
+        "subcommands": ["init", "deploy", "compile", "status", "stop"],
     }
