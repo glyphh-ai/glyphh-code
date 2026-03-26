@@ -1195,7 +1195,7 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
     children = [_format_match(r, detail) for r in ranked[:top_k]]
     top_score = children[0]["value"]
 
-    return {
+    result = {
         "state": "DONE",
         "fact_tree": {
             "description": "Similarity Computation",
@@ -1207,6 +1207,9 @@ async def _handle_search(arguments: dict, context: dict) -> dict:
         "confidence": top_score,
         "match_method": "code_search",
     }
+    if detail == "minimal":
+        result["_detail"] = "minimal"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1298,7 +1301,7 @@ async def _handle_related(arguments: dict, context: dict) -> dict:
         data_context["top_tokens"] = source_inner.get("top_tokens") or source_meta.get("top_tokens", [])
         data_context["imports"] = source_inner.get("imports") or source_meta.get("imports", [])
 
-    return {
+    result = {
         "state": "DONE",
         "fact_tree": {
             "description": "Related Files",
@@ -1310,6 +1313,9 @@ async def _handle_related(arguments: dict, context: dict) -> dict:
         "confidence": children[0]["value"] if children else 0.0,
         "match_method": "code_related",
     }
+    if detail == "minimal":
+        result["_detail"] = "minimal"
+    return result
 
 
 # ---------------------------------------------------------------------------
