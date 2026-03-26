@@ -2,7 +2,7 @@
 Encoder for the Glyphh Code model — file-level codebase intelligence.
 
 Exports:
-    ENCODER_CONFIG     — Three-layer HDC encoder (path + symbols + content)
+    ENCODER_CONFIG     — Four-layer HDC encoder (path + symbols + content + relationships)
     encode_query       — NL text → Concept dict for similarity search
     entry_to_record    — Raw file record → build record for runtime listener
     file_to_record     — Source file path → record dict (compile-time)
@@ -10,15 +10,21 @@ Exports:
     handle_mcp_tool    — Async handler for model-specific MCP calls
 
 Architecture:
-    Path layer (0.30):    file path segments as BoW
-    Symbols layer (0.50): AST-extracted defines + module docstring as BoW
-    Content layer (0.20): identifiers (1.0) + imports (0.8) as BoW
+    Path layer (0.20):          file path segments as BoW
+    Symbols layer (0.25):       AST-extracted defines + module docstring as BoW
+    Content layer (0.35):       identifiers (1.0) + imports (0.8) as BoW
+    Relationships layer (0.20): dependents + references + co-change as BoW
     Dimension: 2000 (pgvector HNSW compatible)
 
     The symbols layer encodes what a file DEFINES (class/function names
     from tree-sitter AST), not what it USES. This naturally separates
     source files from their tests — auth.py defines AuthMiddleware while
     test_auth.py defines test_check_auth.
+
+    The relationships layer encodes extrinsic signals: who imports this
+    file, who uses its symbols, and which files change together in git
+    history. Built from in-memory joins over already-extracted data —
+    no subprocess/grep needed, fully cross-platform.
 
     Hierarchical vector storage: per-layer cortex vectors stored in
     glyph_vectors table. Search queries the appropriate layer based on
@@ -52,7 +58,7 @@ ENCODER_CONFIG = EncoderConfig(
     layers=[
         Layer(
             name="path",
-            similarity_weight=0.25,
+            similarity_weight=0.20,
             segments=[
                 Segment(
                     name="location",
@@ -95,7 +101,7 @@ ENCODER_CONFIG = EncoderConfig(
         ),
         Layer(
             name="content",
-            similarity_weight=0.50,
+            similarity_weight=0.35,
             segments=[
                 Segment(
                     name="vocabulary",
@@ -108,6 +114,32 @@ ENCODER_CONFIG = EncoderConfig(
                         Role(
                             name="imports",
                             similarity_weight=0.8,
+                            text_encoding="bag_of_words",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Layer(
+            name="relationships",
+            similarity_weight=0.20,
+            segments=[
+                Segment(
+                    name="network",
+                    roles=[
+                        Role(
+                            name="dependents",
+                            similarity_weight=1.0,
+                            text_encoding="bag_of_words",
+                        ),
+                        Role(
+                            name="references",
+                            similarity_weight=0.8,
+                            text_encoding="bag_of_words",
+                        ),
+                        Role(
+                            name="co_changed",
+                            similarity_weight=0.6,
                             text_encoding="bag_of_words",
                         ),
                     ],
@@ -362,6 +394,14 @@ def encode_query(query: str) -> dict:
         identifiers = clean
         imports = clean
 
+    # Relationships layer: query tokens match against relationship path
+    # tokens. When the user queries "auth middleware", files whose
+    # dependents/references include "auth" or "middleware" path tokens
+    # get a boost.  Empty string is fine — BoW of "" = zero vector,
+    # so the relationships layer simply doesn't contribute to queries
+    # that don't mention file-like terms.
+    relationship_tokens = clean
+
     stable_id = int(hashlib.md5(query.encode()).hexdigest()[:8], 16)
 
     return {
@@ -373,6 +413,9 @@ def encode_query(query: str) -> dict:
             "file_role": file_role,
             "identifiers": identifiers,
             "imports": imports,
+            "dependents": relationship_tokens,
+            "references": relationship_tokens,
+            "co_changed": relationship_tokens,
         },
     }
 
@@ -405,6 +448,9 @@ def entry_to_record(entry: dict) -> dict:
             "file_role": entry.get("file_role", "source"),
             "identifiers": entry.get("identifiers", ""),
             "imports": entry.get("imports", ""),
+            "dependents": entry.get("dependents", ""),
+            "references": entry.get("references", ""),
+            "co_changed": entry.get("co_changed", ""),
         },
         "metadata": {
             "file_path": file_path,
@@ -477,6 +523,11 @@ def file_to_record(
             "file_role": file_role,
             "identifiers": identifiers,
             "imports": imports,
+            # Relationship roles — populated by compile.py post-processing
+            # via build_relationship_graph() after all files are extracted.
+            "dependents": "",
+            "references": "",
+            "co_changed": "",
         },
         "metadata": {
             "file_path": rel_path,

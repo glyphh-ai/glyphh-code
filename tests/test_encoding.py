@@ -30,13 +30,13 @@ class TestEncoderConfig:
     def test_seed(self):
         assert ENCODER_CONFIG.seed == 42
 
-    def test_three_layers(self):
-        assert len(ENCODER_CONFIG.layers) == 3
+    def test_four_layers(self):
+        assert len(ENCODER_CONFIG.layers) == 4
 
     def test_path_layer(self):
         path_layer = ENCODER_CONFIG.layers[0]
         assert path_layer.name == "path"
-        assert path_layer.similarity_weight == 0.25
+        assert path_layer.similarity_weight == 0.20
 
     def test_symbols_layer(self):
         symbols_layer = ENCODER_CONFIG.layers[1]
@@ -49,7 +49,7 @@ class TestEncoderConfig:
     def test_content_layer(self):
         content_layer = ENCODER_CONFIG.layers[2]
         assert content_layer.name == "content"
-        assert content_layer.similarity_weight == 0.50
+        assert content_layer.similarity_weight == 0.35
 
     def test_content_has_two_roles(self):
         content = ENCODER_CONFIG.layers[2]
@@ -57,6 +57,14 @@ class TestEncoderConfig:
         assert len(vocab.roles) == 2
         role_names = {r.name for r in vocab.roles}
         assert role_names == {"identifiers", "imports"}
+
+    def test_relationships_layer(self):
+        rel_layer = ENCODER_CONFIG.layers[3]
+        assert rel_layer.name == "relationships"
+        assert rel_layer.similarity_weight == 0.20
+        network = rel_layer.segments[0]
+        role_names = {r.name for r in network.roles}
+        assert role_names == {"dependents", "references", "co_changed"}
 
     def test_all_roles_are_bow(self):
         for layer in ENCODER_CONFIG.layers:
@@ -253,6 +261,83 @@ class TestFileToRecord:
         from glyphh_code.encoder import file_to_record
 
         assert file_to_record("/nonexistent/path/foo.py") is None
+
+
+class TestRelationshipGraph:
+    """Test relationship graph extraction."""
+
+    def test_dependents_from_imports(self):
+        from glyphh_code.relationships import build_relationship_graph
+
+        records = [
+            {
+                "concept_text": "src/auth.py",
+                "attributes": {
+                    "defines": "authenticate check_token",
+                    "identifiers": "authenticate check_token request",
+                    "imports": "os json",
+                },
+            },
+            {
+                "concept_text": "src/api.py",
+                "attributes": {
+                    "defines": "handle_request",
+                    "identifiers": "handle_request authenticate auth",
+                    "imports": "auth flask",
+                },
+            },
+        ]
+        graph = build_relationship_graph(records, "/tmp", include_git=False)
+        # api.py imports "auth" → auth.py should have api as a dependent
+        assert "api" in graph["src/auth.py"]["dependents"]
+
+    def test_references_from_symbols(self):
+        from glyphh_code.relationships import build_relationship_graph
+
+        records = [
+            {
+                "concept_text": "models/user.py",
+                "attributes": {
+                    "defines": "user_model create_user",
+                    "identifiers": "user_model create_user database",
+                    "imports": "database",
+                },
+            },
+            {
+                "concept_text": "views/profile.py",
+                "attributes": {
+                    "defines": "show_profile",
+                    "identifiers": "show_profile user_model create_user render",
+                    "imports": "flask",
+                },
+            },
+        ]
+        graph = build_relationship_graph(records, "/tmp", include_git=False)
+        # profile.py uses user_model and create_user → user.py should have references
+        assert "profile" in graph["models/user.py"]["references"]
+
+    def test_no_self_references(self):
+        from glyphh_code.relationships import build_relationship_graph
+
+        records = [
+            {
+                "concept_text": "foo.py",
+                "attributes": {
+                    "defines": "foo_func",
+                    "identifiers": "foo_func bar",
+                    "imports": "foo",
+                },
+            },
+        ]
+        graph = build_relationship_graph(records, "/tmp", include_git=False)
+        assert graph["foo.py"]["dependents"] == ""
+        assert graph["foo.py"]["references"] == ""
+
+    def test_empty_records(self):
+        from glyphh_code.relationships import build_relationship_graph
+
+        graph = build_relationship_graph([], "/tmp", include_git=False)
+        assert graph == {}
 
 
 class TestConstants:

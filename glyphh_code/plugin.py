@@ -49,28 +49,90 @@ def _get_runtime_url() -> str | None:
         return None
 
 
+def _render_bar(current: int, total: int, width: int = 24) -> str:
+    """Render a compact progress bar: ████████░░░░ 412/766 (54%)"""
+    if total <= 0:
+        return ""
+    pct = min(current / total, 1.0)
+    filled = int(width * pct)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"{bar}  {current}/{total} ({pct:.0%})"
+
+
 def _compile_repo(repo_path: str, runtime_url: str) -> tuple[int, list[str]]:
     """Compile the repository into the Glyphh index.
 
+    Streams subprocess stderr for PROGRESS lines and renders a live
+    progress bar for extraction and upload phases.
+
     Returns (file_count, job_ids).
     """
+    import io
+    import threading
+
     env = {**__import__("os").environ, "PYTHONWARNINGS": "ignore"}
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, "-m", "glyphh_code.compile", repo_path,
          "--runtime-url", runtime_url],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
 
-    if result.returncode != 0:
-        click.secho(f"  Compile error: {result.stderr.strip()[:200]}", fg=theme.ERROR)
+    # Read stderr in a background thread to parse progress without blocking
+    stderr_lines: list[str] = []
+    current_phase = ""
+
+    def _read_stderr():
+        nonlocal current_phase
+        assert proc.stderr is not None
+        for raw in proc.stderr:
+            line = raw.rstrip("\n")
+            stderr_lines.append(line)
+            if not line.startswith("PROGRESS:"):
+                continue
+            parts = line.split(":")
+            if len(parts) != 4:
+                continue
+            phase, cur_s, tot_s = parts[1], parts[2], parts[3]
+            try:
+                cur, tot = int(cur_s), int(tot_s)
+            except ValueError:
+                continue
+            if phase != current_phase:
+                if current_phase:
+                    click.echo("\r" + " " * 72 + "\r", nl=False)
+                current_phase = phase
+                label = "Extracting" if phase == "extract" else "Uploading"
+                click.secho(f"         {label}...", fg=theme.TEXT_DIM)
+            bar = _render_bar(cur, tot)
+            click.echo(f"\r         {bar}", nl=False)
+            if cur >= tot:
+                click.echo()
+
+    t = threading.Thread(target=_read_stderr, daemon=True)
+    t.start()
+
+    # Collect stdout while stderr thread runs in parallel
+    stdout_buf = io.StringIO()
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        stdout_buf.write(line)
+
+    proc.wait()
+    t.join(timeout=5)
+    stdout = stdout_buf.getvalue()
+
+    if proc.returncode != 0:
+        err = "\n".join(stderr_lines[-5:]) if stderr_lines else "(no output)"
+        click.secho(f"  Compile error: {err[:200]}", fg=theme.ERROR)
         return 0, []
 
-    # Parse file count and job IDs from output
+    # Parse file count and job IDs from stdout
     file_count = 0
     job_ids = []
-    for line in result.stdout.strip().split("\n"):
+    for line in stdout.strip().split("\n"):
         if "files indexed" in line:
             try:
                 file_count = int(line.split(":")[1].strip().split()[0])
@@ -410,7 +472,7 @@ def _cmd_init(args: str):
     # Step 5: Configure Claude Code (update paths + instructions on upgrade)
     click.secho("  [5/5] Configuring Claude Code...", fg=theme.MUTED)
     dev_info = json.loads((_GLYPHH_DIR / "dev.json").read_text())
-    mcp_url = dev_info.get("mcp_url", f"{runtime_url}/local-dev-org/code/mcp")
+    mcp_url = dev_info.get("mcp_url") or f"{runtime_url}/local-dev-org/code/mcp"
     _configure_claude_code(repo, mcp_url, is_upgrade=is_upgrade)
 
     # Save state

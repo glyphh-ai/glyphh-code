@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from glyphh_code.encoder import SKIP_DIRS, INDEXABLE_EXTENSIONS, MAX_FILE_BYTES, file_to_record  # noqa: E402
+from glyphh_code.relationships import build_relationship_graph  # noqa: E402
 
 
 DEFAULT_RUNTIME_URL = "http://localhost:8002"
@@ -301,12 +302,15 @@ def compile_repo(
     # Generate records (AST extraction happens inside file_to_record)
     records = []
     skipped = 0
-    for file_path in files:
+    total_files = len(files)
+    for idx, file_path in enumerate(files):
+        print(f"PROGRESS:extract:{idx}:{total_files}", file=sys.stderr, flush=True)
         record = file_to_record(file_path, repo_root)
         if record is None:
             skipped += 1
             continue
         records.append(record)
+    print(f"PROGRESS:extract:{total_files}:{total_files}", file=sys.stderr, flush=True)
 
     print(f"Encoded: {len(records)} files ({skipped} skipped)")
 
@@ -323,6 +327,27 @@ def compile_repo(
     if not records:
         print("Nothing to index.")
         return 0, []
+
+    # Build relationship graph from all extracted records.
+    # Uses in-memory joins (imports → dependents, defines → references)
+    # plus git log for co-change. No grep subprocess needed.
+    print("Building relationship graph...", flush=True)
+    print(f"PROGRESS:relationships:0:1", file=sys.stderr, flush=True)
+    rel_graph = build_relationship_graph(records, repo_root)
+    print(f"PROGRESS:relationships:1:1", file=sys.stderr, flush=True)
+
+    # Inject relationship data into each record's attributes
+    for r in records:
+        rel_path = r.get("concept_text", "")
+        rels = rel_graph.get(rel_path, {})
+        r["attributes"]["dependents"] = rels.get("dependents", "")
+        r["attributes"]["references"] = rels.get("references", "")
+        r["attributes"]["co_changed"] = rels.get("co_changed", "")
+
+    rel_stats = sum(1 for r in records if any(
+        r["attributes"].get(k, "") for k in ("dependents", "references", "co_changed")
+    ))
+    print(f"Relationships: {rel_stats}/{len(records)} files have connections")
 
     # Send records in hierarchical format matching the encoder config.
     # The listener auto-maps layer/segment/role structure for encoding
@@ -349,6 +374,13 @@ def compile_repo(
                     "imports": attrs.get("imports", ""),
                 },
             },
+            "relationships": {
+                "network": {
+                    "dependents": attrs.get("dependents", ""),
+                    "references": attrs.get("references", ""),
+                    "co_changed": attrs.get("co_changed", ""),
+                },
+            },
             "concept_text": r.get("concept_text", ""),
             "metadata": r.get("metadata", {}),
         }
@@ -360,8 +392,10 @@ def compile_repo(
     job_ids = []
     total_encoded = 0
     total_failed = 0
-    num_batches = (len(hierarchical_records) + BATCH_SIZE - 1) // BATCH_SIZE
-    for i in range(0, len(hierarchical_records), BATCH_SIZE):
+    total_records = len(hierarchical_records)
+    num_batches = (total_records + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"PROGRESS:upload:0:{total_records}", file=sys.stderr, flush=True)
+    for i in range(0, total_records, BATCH_SIZE):
         batch_num = i // BATCH_SIZE + 1
         batch = hierarchical_records[i : i + BATCH_SIZE]
         result = post_to_listener(batch, runtime_url, org_id, model_id, token)
@@ -376,6 +410,7 @@ def compile_repo(
         total_encoded += encoded
         total_failed += failed
         print(f"  ✓ {encoded} encoded, {failed} failed")
+        print(f"PROGRESS:upload:{min(i + BATCH_SIZE, total_records)}:{total_records}", file=sys.stderr, flush=True)
 
     elapsed = time.time() - start
     print(f"Done: {total_encoded}/{len(records)} files indexed in {elapsed:.1f}s"
