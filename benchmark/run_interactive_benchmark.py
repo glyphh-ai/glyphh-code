@@ -48,7 +48,7 @@ MCP_CONFIG = {
     "mcpServers": {
         "glyphh": {
             "type": "http",
-            "url": "http://localhost:8002/local-dev-org/code/mcp",
+            "url": "http://localhost:8002/{org_id}/code/mcp",
         }
     }
 }

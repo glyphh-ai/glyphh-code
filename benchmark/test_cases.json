@@ -1,7 +1,7 @@
 {
   "description": "Code intelligence benchmark for fastmcp codebase (~766 files). Tests blast radius, drift scoring, and risk profiling — the capabilities where Glyphh has no grep equivalent.",
   "runtime_url": "http://localhost:8002",
-  "org_id": "local-dev-org",
+  "org_id": "{org_id}",
   "model_id": "code",
   "test_cases": [
     {
