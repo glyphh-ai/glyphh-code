@@ -45,17 +45,30 @@ Built on [**Glyphh Ada 1.1**](https://www.glyphh.ai/products/runtime) · **[Docs
   (required for `code init` to register the MCP server and configure hooks)
 
 
+## Install
+
+```bash
+pipx install glyphh-code
+```
+
+`pipx` installs `glyphh-code` globally — the `glyphh` CLI and the `glyphh-hook`
+helper land on your PATH once and work across every project. No venv juggling.
+
+If you don't have pipx: `pip install pipx && pipx ensurepath`.
+
+> **Why pipx?** `code init` writes hook commands into each project's
+> `.claude/settings.json`. Those hooks call `glyphh-hook`, which must be on
+> PATH when Claude Code runs — regardless of which project you're in. A global
+> install means you can `code init` in project A, switch to project B, run
+> `code init` there, and both keep working.
+>
+> `pip install glyphh-code` works too, but only if you install into the same
+> environment every time or activate the right venv before opening Claude Code.
+
+
 ## Quick Start
 
 One install, one command. No Docker, no PostgreSQL, no auth required.
-
-```bash
-pip install glyphh-code
-```
-
-This installs the Glyphh runtime, CLI, and the Code model as a single package.
-
-Then from your project root:
 
 ```bash
 glyphh            # enter the Glyphh shell
@@ -75,6 +88,13 @@ Restart". In the CLI: exit and re-enter the session.
 Verify the connection with `/mcp` — you should see `glyphh_search`,
 `glyphh_related`, `glyphh_drift`, `glyphh_risk`, and `glyphh_stats` listed
 as available tools.
+
+
+### Multiple projects
+
+Run `code init .` in each repo. Each project gets its own index and hooks
+pointing to its own `.glyphh/` directory. The shared `glyphh-hook` binary on
+PATH handles dispatch — no cross-project path dependencies.
 
 
 ## Using PostgreSQL + pgvector (optional)
@@ -268,8 +288,8 @@ project:
 - **MCP server** — `claude mcp add --transport http glyphh <url>`
 - **`.claude/settings.json`** — hooks and permissions:
   - `mcp__glyphh__*` permission (no MCP prompts)
-  - PreToolUse hook: gates Grep/Glob/Bash until `glyphh_search` has been called
-  - PostToolUse hook: runs incremental compile after `git commit`
+  - PreToolUse hook: `glyphh-hook search-gate` gates Grep/Glob/Bash until `glyphh_search` has been called
+  - PostToolUse hook: `glyphh-hook post-git-compile` runs incremental compile after `git commit`
 - **`.gitignore`** — adds `.glyphh/` entry
 - **CLAUDE.md migration** — removes previously injected Glyphh sections (if any)
 

@@ -238,6 +238,20 @@ def _deploy_model(runtime_url: str) -> bool:
         return False
 
 
+def _hook_cmd(subcommand: str, *args: str) -> str:
+    """Build a portable hook command that works across venvs and source trees.
+
+    Prefers `glyphh-hook` on PATH (global/pipx install), falls back to
+    `python -m glyphh_code.hooks` using the current interpreter.
+    """
+    import shutil
+    suffix = " ".join(str(a) for a in args)
+    if shutil.which("glyphh-hook"):
+        return f"glyphh-hook {subcommand} {suffix}".strip()
+    # Fall back to the interpreter that's running right now
+    return f"{sys.executable} -m glyphh_code.hooks {subcommand} {suffix}".strip()
+
+
 def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = False):
     """Configure Claude Code: MCP server, hooks, permissions, rules.
 
@@ -315,9 +329,8 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
 
     # ── PreToolUse: gate Grep/Glob/Bash(grep|find) until glyphh_search called ─
     pre_hooks = hooks.setdefault("PreToolUse", [])
-    gate_script = _PACKAGE_DIR / "hooks" / "search-gate.sh"
-    gate_cmd = f"bash {gate_script} {glyphh_dir}"
-    # Remove stale glyphh gate hooks, then add current
+    gate_cmd = _hook_cmd("search-gate", glyphh_dir)
+    # Remove stale glyphh gate hooks (old absolute paths + new), then add current
     pre_hooks[:] = [
         h for h in pre_hooks
         if "search-gate" not in h.get("hooks", [{}])[0].get("command", "")
@@ -343,26 +356,25 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
     })
 
     # ── PostToolUse: incremental compile after git commits ───────────────
-    compile_script = _PACKAGE_DIR / "hooks" / "post-git-compile.sh"
-    if compile_script.exists():
-        if is_upgrade:
-            # Replace existing compile hook with updated path
-            post_hooks[:] = [
-                h for h in post_hooks
-                if "post-git-compile" not in h.get("hooks", [{}])[0].get("command", "")
-                and "post-commit-compile" not in h.get("hooks", [{}])[0].get("command", "")
-            ]
-        else:
-            # First init — just clean up legacy hook name
-            post_hooks[:] = [
-                h for h in post_hooks
-                if "post-commit-compile" not in h.get("hooks", [{}])[0].get("command", "")
-            ]
-        if not any("post-git-compile" in h.get("hooks", [{}])[0].get("command", "") for h in post_hooks):
-            post_hooks.append({
-                "matcher": "Bash",
-                "hooks": [{"type": "command", "command": f"{compile_script} {repo}"}],
-            })
+    compile_cmd = _hook_cmd("post-git-compile", repo)
+    if is_upgrade:
+        # Replace existing compile hook with updated command
+        post_hooks[:] = [
+            h for h in post_hooks
+            if "post-git-compile" not in h.get("hooks", [{}])[0].get("command", "")
+            and "post-commit-compile" not in h.get("hooks", [{}])[0].get("command", "")
+        ]
+    else:
+        # First init — just clean up legacy hook name
+        post_hooks[:] = [
+            h for h in post_hooks
+            if "post-commit-compile" not in h.get("hooks", [{}])[0].get("command", "")
+        ]
+    if not any("post-git-compile" in h.get("hooks", [{}])[0].get("command", "") for h in post_hooks):
+        post_hooks.append({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": compile_cmd}],
+        })
 
     settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     click.secho("  ✓ Hooks and permissions configured", fg=theme.SUCCESS)
