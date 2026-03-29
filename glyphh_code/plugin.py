@@ -5,7 +5,6 @@ Registers as 'code' command via entry points:
     glyphh> code init .
     glyphh> code compile .
     glyphh> code status
-    glyphh> code stop
 """
 
 import json
@@ -36,17 +35,53 @@ _GLYPHH_DIR = Path.home() / ".glyphh"
 _STATE_FILE = _GLYPHH_DIR / "code.json"
 
 
-def _get_runtime_url() -> str | None:
-    """Get the URL of the running dev server."""
-    dev_info = _GLYPHH_DIR / "dev.json"
-    if not dev_info.exists():
-        return None
+def _get_session() -> dict:
+    """Load CLI session from ~/.glyphh/config.json."""
+    config_file = _GLYPHH_DIR / "config.json"
+    if config_file.exists():
+        try:
+            return json.loads(config_file.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _get_org_id() -> str | None:
+    """Get org_id from CLI session."""
+    return _get_session().get("user", {}).get("org_id")
+
+
+def _get_token() -> str | None:
+    """Get auth token from CLI session."""
+    session = _get_session()
+    # Per-endpoint token → runtime_token → access_token
+    runtime_tokens = session.get("runtime_tokens", {})
+    if isinstance(runtime_tokens, dict):
+        for token in runtime_tokens.values():
+            if token.strip():
+                return token.strip()
+    rt = session.get("runtime_token", "").strip()
+    if rt:
+        return rt
+    return session.get("access_token", "").strip() or None
+
+
+def _get_runtime_url() -> str:
+    """Get the runtime URL. Defaults to localhost:8002."""
     try:
-        info = json.loads(dev_info.read_text())
-        port = info.get("port", 8002)
-        return f"http://localhost:{port}"
-    except Exception:
-        return None
+        from glyphh.cli.config import resolve_runtime_url
+        return resolve_runtime_url()
+    except ImportError:
+        return "http://localhost:8002"
+
+
+def _require_auth() -> tuple[str, str, str | None]:
+    """Return (runtime_url, org_id, token) or exit with error."""
+    org_id = _get_org_id()
+    if not org_id:
+        click.secho("  Not logged in. Run: glyphh auth login", fg=theme.ERROR)
+        raise SystemExit(1)
+    return _get_runtime_url(), org_id, _get_token()
 
 
 def _render_bar(current: int, total: int, width: int = 24) -> str:
@@ -59,7 +94,7 @@ def _render_bar(current: int, total: int, width: int = 24) -> str:
     return f"{bar}  {current}/{total} ({pct:.0%})"
 
 
-def _compile_repo(repo_path: str, runtime_url: str) -> tuple[int, list[str]]:
+def _compile_repo(repo_path: str, runtime_url: str, org_id: str, token: str | None) -> tuple[int, list[str]]:
     """Compile the repository into the Glyphh index.
 
     Streams subprocess stderr for PROGRESS lines and renders a live
@@ -70,10 +105,17 @@ def _compile_repo(repo_path: str, runtime_url: str) -> tuple[int, list[str]]:
     import io
     import threading
 
+    cmd = [
+        sys.executable, "-m", "glyphh_code.compile", repo_path,
+        "--runtime-url", runtime_url,
+        "--org-id", org_id,
+    ]
+    if token:
+        cmd.extend(["--token", token])
+
     env = {**__import__("os").environ, "PYTHONWARNINGS": "ignore"}
     proc = subprocess.Popen(
-        [sys.executable, "-m", "glyphh_code.compile", repo_path,
-         "--runtime-url", runtime_url],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -161,8 +203,9 @@ def _compile_repo(repo_path: str, runtime_url: str) -> tuple[int, list[str]]:
 def _wait_for_jobs(
     job_ids: list[str],
     runtime_url: str,
-    org_id: str = "local-dev-org",
+    org_id: str,
     model_id: str = "code",
+    token: str | None = None,
     timeout: int = 300,
     poll_interval: float = 1.0,
 ) -> bool:
@@ -178,6 +221,10 @@ def _wait_for_jobs(
         warnings.simplefilter("ignore")
         import requests
 
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     pending = set(job_ids)
     deadline = time.time() + timeout
 
@@ -188,6 +235,7 @@ def _wait_for_jobs(
             try:
                 r = requests.get(
                     f"{runtime_url}/{org_id}/{model_id}/listener/jobs/{job_id}",
+                    headers=headers,
                     timeout=10,
                 )
                 if r.status_code != 200:
@@ -209,11 +257,12 @@ def _wait_for_jobs(
     return True
 
 
-def _deploy_model(runtime_url: str) -> bool:
+def _deploy_model(runtime_url: str, org_id: str, token: str | None, project_dir: Path | None = None) -> bool:
     """Deploy the code model to the running runtime via API.
 
     Uses the runtime's package_model to create a .glyphh ZIP,
     then uploads it as a multipart file — same flow as `model deploy`.
+    If project_dir is set, stores the .glyphh file there for visibility.
     """
     try:
         from glyphh.cli.packaging import package_model
@@ -222,16 +271,29 @@ def _deploy_model(runtime_url: str) -> bool:
         # Package the model directory into a .glyphh file
         glyphh_file = package_model(_PACKAGE_DIR)
 
+        # If project_dir is set, copy the .glyphh file there for visibility
+        if project_dir:
+            dest_dir = project_dir / ".glyphh"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / glyphh_file.name
+            import shutil
+            shutil.copy2(glyphh_file, dest)
+            click.secho(f"  Model stored: {dest}", fg=theme.TEXT_DIM)
+
         try:
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             with httpx.Client(timeout=60) as client:
                 with open(glyphh_file, "rb") as f:
                     r = client.post(
-                        f"{runtime_url}/local-dev-org/code/model/deploy",
+                        f"{runtime_url}/{org_id}/code/model/deploy",
                         files={"file": (glyphh_file.name, f, "application/octet-stream")},
+                        headers=headers,
                     )
             return r.status_code in (200, 201)
         finally:
-            # Clean up the temporary .glyphh file
+            # Clean up the temporary .glyphh file (project copy already saved)
             glyphh_file.unlink(missing_ok=True)
     except Exception as e:
         click.secho(f"  Deploy warning: {e}", fg=theme.WARNING)
@@ -409,8 +471,7 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
     )
     click.secho("  ✓ Navigation rules written to .claude/rules/glyphh.md", fg=theme.SUCCESS)
 
-    # 6. Write .glyphh/manifest.yaml so `model` commands resolve model_id
-    glyphh_dir = repo / ".glyphh"
+    # 5. Write .glyphh/manifest.yaml so `model` commands resolve model_id
     glyphh_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = glyphh_dir / "manifest.yaml"
     manifest_path.write_text(
@@ -419,7 +480,7 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
         "name: Glyphh Code\n"
     )
 
-    # 7. Add .glyphh/ to .gitignore
+    # 6. Add .glyphh/ to .gitignore
     gitignore = repo / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
@@ -432,33 +493,6 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
         click.secho("  ✓ .gitignore created", fg=theme.SUCCESS)
 
 
-def _start_dev_server() -> str | None:
-    """Auto-start the dev server if not running. Returns runtime URL."""
-    runtime_url = _get_runtime_url()
-    if runtime_url:
-        return runtime_url
-
-    click.secho("  Starting dev server...", fg=theme.MUTED)
-    try:
-        from glyphh.cli.commands.dev import handle_dev
-        # Start daemon pointing at our package dir (has manifest.yaml)
-        handle_dev("start", str(_PACKAGE_DIR))
-    except Exception as e:
-        click.secho(f"  Could not auto-start: {e}", fg=theme.WARNING)
-        click.secho("  Start manually: dev start", fg=theme.ACCENT)
-        return None
-
-    # Wait for server to come up
-    for _ in range(10):
-        time.sleep(1)
-        runtime_url = _get_runtime_url()
-        if runtime_url:
-            return runtime_url
-
-    click.secho("  Server did not start in time.", fg=theme.ERROR)
-    return None
-
-
 def _cmd_init(args: str):
     """code init [path] — setup or upgrade a repository."""
     repo = str(Path(args.strip() or ".").resolve())
@@ -466,6 +500,9 @@ def _cmd_init(args: str):
     if not Path(repo).is_dir():
         click.secho(f"  Not a directory: {repo}", fg=theme.ERROR)
         return
+
+    # Require auth
+    runtime_url, org_id, token = _require_auth()
 
     # Detect upgrade: state file exists for this repo
     is_upgrade = False
@@ -477,26 +514,28 @@ def _cmd_init(args: str):
         except (json.JSONDecodeError, KeyError):
             pass
 
-    runtime_url = _start_dev_server()
-    if not runtime_url:
-        return
-
     mode = "upgrade" if is_upgrade else "init"
     click.echo()
     click.secho(f"  Glyphh Code  ·  {mode}", fg=theme.TEXT, bold=True)
     click.secho(f"  {repo}", fg=theme.TEXT_DIM)
     click.echo()
 
-    # Step 1: Deploy model (new weights / encoder on upgrade)
+    # Step 1: Deploy model (stores .glyphh file in project dir)
     click.secho("  [1/4] Deploying model...", fg=theme.MUTED)
-    _deploy_model(runtime_url)
+    _deploy_model(runtime_url, org_id, token, project_dir=Path(repo))
 
     # Step 2: Clear existing index (stale data from old weights)
     click.secho("  [2/4] Clearing index...", fg=theme.MUTED)
     try:
         import httpx
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         with httpx.Client(timeout=30) as client:
-            r = client.delete(f"{runtime_url}/local-dev-org/code/data")
+            r = client.delete(
+                f"{runtime_url}/{org_id}/code/data",
+                headers=headers,
+            )
             if r.status_code == 200:
                 deleted = r.json().get("glyphs_deleted", 0)
                 if deleted:
@@ -504,21 +543,21 @@ def _cmd_init(args: str):
     except Exception:
         pass  # Fresh install — nothing to clear
 
-    # Step 3: Compile + encode (compile.py extracts, builds graph, encodes, uploads)
+    # Step 3: Compile + encode
     click.secho("  [3/4] Compiling codebase...", fg=theme.MUTED)
-    file_count, job_ids = _compile_repo(repo, runtime_url)
+    file_count, job_ids = _compile_repo(repo, runtime_url, org_id, token)
     click.secho(f"         {file_count} files indexed", fg=theme.TEXT_DIM)
 
-    # Step 4: Configure Claude Code (update paths + instructions on upgrade)
+    # Step 4: Configure Claude Code
     click.secho("  [4/4] Configuring Claude Code...", fg=theme.MUTED)
-    dev_info = json.loads((_GLYPHH_DIR / "dev.json").read_text())
-    mcp_url = dev_info.get("mcp_url") or f"{runtime_url}/local-dev-org/code/mcp"
+    mcp_url = f"{runtime_url}/{org_id}/code/mcp"
     _configure_claude_code(repo, mcp_url, is_upgrade=is_upgrade)
 
     # Save state
     _STATE_FILE.write_text(json.dumps({
         "repo": repo,
         "runtime_url": runtime_url,
+        "org_id": org_id,
         "mcp_url": mcp_url,
         "file_count": file_count,
     }))
@@ -539,12 +578,10 @@ def _cmd_init(args: str):
 
 def _cmd_deploy(args: str):
     """code deploy — redeploy the model without re-encoding."""
-    runtime_url = _start_dev_server()
-    if not runtime_url:
-        return
+    runtime_url, org_id, token = _require_auth()
 
     click.secho("  Deploying model...", fg=theme.TEXT)
-    if _deploy_model(runtime_url):
+    if _deploy_model(runtime_url, org_id, token):
         click.secho("  Model deployed.", fg=theme.SUCCESS)
         click.echo()
         click.secho("  Restart Claude Code to activate.", fg=theme.MUTED)
@@ -555,13 +592,11 @@ def _cmd_deploy(args: str):
 
 def _cmd_compile(args: str):
     """code compile [path] — recompile the index."""
-    runtime_url = _start_dev_server()
-    if not runtime_url:
-        return
+    runtime_url, org_id, token = _require_auth()
 
     repo = str(Path(args.strip() or ".").resolve())
     click.secho(f"  Compiling: {repo}", fg=theme.TEXT)
-    count, job_ids = _compile_repo(repo, runtime_url)
+    count, job_ids = _compile_repo(repo, runtime_url, org_id, token)
     click.secho(f"  Done: {count} files indexed", fg=theme.SUCCESS)
 
 
@@ -573,17 +608,10 @@ def _cmd_status(args: str):
         return
 
     state = json.loads(_STATE_FILE.read_text())
-    runtime_url = _get_runtime_url()
 
     click.echo()
-    if runtime_url:
-        dot = click.style("●", fg=theme.SUCCESS)
-        click.echo(f"  {dot} {click.style('running', fg=theme.SUCCESS)}")
-    else:
-        dot = click.style("●", fg=theme.ERROR)
-        click.echo(f"  {dot} {click.style('server not running', fg=theme.ERROR)}")
-
-    click.echo()
+    org_id = state.get("org_id", _get_org_id() or "?")
+    click.secho(f"  Org:     {org_id}", fg=theme.TEXT_DIM)
     click.secho(f"  Repo:    {state.get('repo', '?')}", fg=theme.TEXT_DIM)
     click.secho(f"  Files:   {state.get('file_count', '?')} indexed", fg=theme.TEXT_DIM)
     click.secho(f"  MCP:     {state.get('mcp_url', '?')}", fg=theme.ACCENT)
@@ -593,15 +621,6 @@ def _cmd_status(args: str):
     click.echo()
 
 
-def _cmd_stop(args: str):
-    """code stop — stop the dev server."""
-    try:
-        from glyphh.cli.commands.dev import handle_dev
-        handle_dev("stop", args)
-    except Exception as e:
-        click.secho(f"  Error: {e}", fg=theme.ERROR)
-
-
 def handle_code(func: str | None, args: str = ""):
     """Route code subcommands from the Glyphh shell."""
     commands = {
@@ -609,7 +628,6 @@ def handle_code(func: str | None, args: str = ""):
         "deploy": _cmd_deploy,
         "compile": _cmd_compile,
         "status": _cmd_status,
-        "stop": _cmd_stop,
     }
 
     if func is None:
@@ -621,12 +639,12 @@ def handle_code(func: str | None, args: str = ""):
         handler(args)
     else:
         click.secho(f"  Unknown: code {func}", fg=theme.WARNING)
-        click.secho("  Available: init, deploy, compile, status, stop", fg=theme.TEXT_DIM)
+        click.secho("  Available: init, deploy, compile, status", fg=theme.TEXT_DIM)
 
 
 def register():
     """Entry point registration — called by runtime shell plugin discovery."""
     return {
         "handler": handle_code,
-        "subcommands": ["init", "deploy", "compile", "status", "stop"],
+        "subcommands": ["init", "deploy", "compile", "status"],
     }

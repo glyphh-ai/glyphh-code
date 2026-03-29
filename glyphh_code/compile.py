@@ -36,7 +36,6 @@ from glyphh_code.relationships import build_relationship_graph  # noqa: E402
 
 
 DEFAULT_RUNTIME_URL = "http://localhost:8002"
-DEFAULT_ORG_ID = "local-dev-org"
 DEFAULT_MODEL_ID = "code"
 BATCH_SIZE = 50
 
@@ -58,14 +57,10 @@ def _resolve_token(explicit: str | None, runtime_url: str) -> str | None:
 
     Priority: explicit --token / GLYPHH_TOKEN →
               runtime_tokens[endpoint] → runtime_token → access_token.
-    Only reads the CLI session for remote (non-localhost) URLs.
     """
     if explicit:
         return explicit
-    from urllib.parse import urlparse
-    host = urlparse(runtime_url).hostname
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return None
+
     config = _load_cli_config()
 
     # Per-endpoint token (matches CLI's resolve_runtime_token priority)
@@ -92,24 +87,22 @@ def _resolve_token(explicit: str | None, runtime_url: str) -> str | None:
     return None
 
 
-def _resolve_org_id(explicit: str, runtime_url: str) -> str:
+def _resolve_org_id(explicit: str | None, runtime_url: str) -> str:
     """Return the org ID to use.
 
-    Priority: explicit --org-id / GLYPHH_ORG_ID → CLI session org_id.
-    Falls back to DEFAULT_ORG_ID for localhost.
+    Priority: explicit --org-id → CLI session org_id.
     """
-    if explicit != DEFAULT_ORG_ID:
+    if explicit:
         return explicit
-    from urllib.parse import urlparse
-    host = urlparse(runtime_url).hostname
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return DEFAULT_ORG_ID
+
     config = _load_cli_config()
     org_id = config.get("user", {}).get("org_id")
     if org_id:
         print(f"Using org_id from CLI session: {org_id}")
         return org_id
-    return DEFAULT_ORG_ID
+
+    print("Error: no org_id available. Run: glyphh auth login")
+    sys.exit(1)
 
 
 def walk_repo(root: str) -> list[str]:
@@ -230,7 +223,7 @@ def wait_for_job(
 def compile_repo(
     repo_root: str,
     runtime_url: str = DEFAULT_RUNTIME_URL,
-    org_id: str = DEFAULT_ORG_ID,
+    org_id: str | None = None,
     model_id: str = DEFAULT_MODEL_ID,
     token: str | None = None,
     incremental: bool = False,
@@ -249,6 +242,9 @@ def compile_repo(
     Uses tree-sitter AST extraction (with regex fallback) for the symbols
     layer — no LLM required. Fully deterministic.
     """
+    if org_id is None:
+        org_id = _resolve_org_id(None, runtime_url)
+
     repo_root = os.path.abspath(repo_root)
     if not os.path.isdir(repo_root):
         print(f"Error: {repo_root} is not a directory")
@@ -430,7 +426,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--org-id",
-        default=os.environ.get("GLYPHH_ORG_ID", DEFAULT_ORG_ID),
+        default=os.environ.get("GLYPHH_ORG_ID"),
     )
     parser.add_argument(
         "--model-id",
