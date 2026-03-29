@@ -574,6 +574,9 @@ def _cmd_init(args: str):
     click.secho("  Restart Claude Code to activate.", fg=theme.MUTED)
     click.secho("  VS Code: Cmd+Shift+P → 'Claude Code: Restart'", fg=theme.TEXT_DIM)
     click.echo()
+    click.secho("  To keep the runtime alive after quitting the shell:", fg=theme.MUTED)
+    click.secho("    glyphh serve &", fg=theme.TEXT_DIM)
+    click.echo()
 
 
 def _cmd_deploy(args: str):
