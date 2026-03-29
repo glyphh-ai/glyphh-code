@@ -386,6 +386,14 @@ def _configure_claude_code(repo_path: str, mcp_url: str, is_upgrade: bool = Fals
         "about a file. It returns only the matching sections, not the full file.\n"
         "Only fall back to Read when you need the complete file.\n"
         "Call glyphh_related before editing any file to understand blast radius.\n"
+        "\n"
+        "## Session Memory\n"
+        "\n"
+        "Use glyphh_session_write to record important decisions, changes, and\n"
+        "context as you work. This encodes notes into HDC vectors so they persist\n"
+        "across context window compactions.\n"
+        "Use glyphh_session_recall to retrieve prior notes by semantic similarity\n"
+        "before re-reading files or re-exploring code you already investigated.\n"
     )
     click.secho("  ✓ Navigation rules written to .claude/rules/glyphh.md", fg=theme.SUCCESS)
 

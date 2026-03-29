@@ -1,0 +1,177 @@
+{
+  "notes": [
+    {
+      "label": "auth_middleware_jwt",
+      "content": "Refactored glyphh_code/encoder.py auth middleware to validate JWT tokens. Added expiry check and signature verification. The handle_mcp_tool function now routes auth failures to a 401 response."
+    },
+    {
+      "label": "db_migration_index",
+      "content": "Database migration adds composite index on glyph_vectors table for (org_id, model_id, level). This should speed up hierarchical embedding lookups by 10x. Changed domains/models/db_models.py and added alembic migration."
+    },
+    {
+      "label": "session_encoder_design",
+      "content": "Designed the SESSION_ENCODER_CONFIG with 2 layers: content (0.60 weight) and context (0.40 weight). Content layer has identifiers and summary roles, both bag_of_words. Context layer has paths and symbols roles. Seed 73 to keep it independent from the file index encoder seed 42."
+    },
+    {
+      "label": "studio_landing_cleanup",
+      "content": "Removed the code demo from glyphh-studio Landing.tsx and Compare.tsx pages. The DEMO_MODELS array now only has toolrouter and churn entries. Tagged as v1.0.2."
+    },
+    {
+      "label": "bfcl_multi_turn",
+      "content": "Multi-turn scoring improved with Opus 4.5 by 11.37 points. The multi_turn_handler.py now tracks conversation state across turns. Key issue was that Haiku loses context after 3 turns."
+    },
+    {
+      "label": "pipedream_app_routing",
+      "content": "Pipedream two-stage routing: extract_app() does string match with 5-word window, then filtered pgvector cosine search with 0.15 exact-slug bonus. App accuracy at 100%, action accuracy at 89.6% on 85K test queries."
+    },
+    {
+      "label": "gql_query_optimization",
+      "content": "Optimized GQL FIND SIMILAR queries to use batch vector comparison instead of sequential. Reduced latency from 120ms to 35ms for typical 500-glyph collections. Changed gql/executor.py and gql/similarity.py."
+    },
+    {
+      "label": "temporal_delta_tracking",
+      "content": "Added temporal delta tracking to the churn model. BeamSearchPredictor with beam_width=5 and drift_reduction=True. History of 4+ glyphs needed for reliable predictions. Trend statistics show autocorrelation of 0.7 for customer behavior."
+    },
+    {
+      "label": "linguistics_morphology",
+      "content": "The MorphologyEngine uses learned transforms from seed pairs for plurals, past tense, gerunds, and comparatives. Transform is bundle of bind pairs. normalize() converts inflected forms back to base using HD algebra: bind(x, bind(x,y)) = y. MATCH_THRESHOLD at 0.20."
+    },
+    {
+      "label": "settings_cleanup",
+      "content": "Cleaned up ~/.claude/settings.json — removed 125 accumulated allow entries, replaced with just defaultMode bypassPermissions. Project .claude/settings.json is now the single source of truth. Removed duplicate mcp__glyphh__* entry and legacy top-level permission keys."
+    },
+    {
+      "label": "toolrouter_intent",
+      "content": "Toolrouter intent.py has 28 actions, 22 targets, 8 SaaS domains. Uses VERB_MAP with 120 entries, IMPACT_RANK for ambiguity resolution, and TARGET_MAP with 80 entries. Leading-verb priority and payment-verb domain pinning."
+    },
+    {
+      "label": "faq_model_tests",
+      "content": "FAQ model has 36 tests passing. The intent.py is minimal at 90 lines — billing and shipping verb detection, payment and ticket domain signals, keyword extraction. Imports from local intent.py into encoder.py."
+    }
+  ],
+  "queries": {
+    "clear": [
+      {
+        "query": "JWT auth middleware refactoring and expiry check",
+        "expected": "auth_middleware_jwt",
+        "category": "clear"
+      },
+      {
+        "query": "What was the session encoder design decision?",
+        "expected": "session_encoder_design",
+        "category": "clear"
+      },
+      {
+        "query": "What happened with the studio landing page?",
+        "expected": "studio_landing_cleanup",
+        "category": "clear"
+      },
+      {
+        "query": "How does pipedream route apps?",
+        "expected": "pipedream_app_routing",
+        "category": "clear"
+      },
+      {
+        "query": "What was the settings.json cleanup?",
+        "expected": "settings_cleanup",
+        "category": "clear"
+      }
+    ],
+    "near_collision": [
+      {
+        "query": "encoder.py changes for session support",
+        "expected": "session_encoder_design",
+        "category": "near_collision",
+        "note": "Both auth_middleware_jwt and session_encoder_design mention encoder.py"
+      },
+      {
+        "query": "toolrouter VERB_MAP and TARGET_MAP intent extraction",
+        "expected": "toolrouter_intent",
+        "category": "near_collision",
+        "note": "Both toolrouter_intent and faq_model_tests discuss intent extraction"
+      },
+      {
+        "query": "database performance improvement",
+        "expected": "db_migration_index",
+        "category": "near_collision",
+        "note": "Both db_migration_index and gql_query_optimization are about performance"
+      },
+      {
+        "query": "pipedream app routing accuracy on 85K queries",
+        "expected": "pipedream_app_routing",
+        "category": "near_collision",
+        "note": "Both pipedream and bfcl discuss accuracy numbers"
+      },
+      {
+        "query": "multi-turn conversation handling",
+        "expected": "bfcl_multi_turn",
+        "category": "near_collision",
+        "note": "Could confuse with temporal_delta_tracking which also tracks state over time"
+      },
+      {
+        "query": "morphology normalize with HD bind algebra",
+        "expected": "linguistics_morphology",
+        "category": "near_collision",
+        "note": "Both linguistics_morphology and temporal_delta_tracking reference HD operations"
+      }
+    ],
+    "context_recall": [
+      {
+        "query": "changes to db_models.py",
+        "expected": "db_migration_index",
+        "category": "context_recall",
+        "note": "Recall via file path mention"
+      },
+      {
+        "query": "what changed in gql/executor.py",
+        "expected": "gql_query_optimization",
+        "category": "context_recall",
+        "note": "Recall via file path mention"
+      },
+      {
+        "query": "handle_mcp_tool routing changes",
+        "expected": "auth_middleware_jwt",
+        "category": "context_recall",
+        "note": "Recall via code symbol mention"
+      },
+      {
+        "query": "BeamSearchPredictor usage",
+        "expected": "temporal_delta_tracking",
+        "category": "context_recall",
+        "note": "Recall via class name symbol"
+      },
+      {
+        "query": "MorphologyEngine normalize function",
+        "expected": "linguistics_morphology",
+        "category": "context_recall",
+        "note": "Recall via class and function name"
+      },
+      {
+        "query": "Landing.tsx and Compare.tsx",
+        "expected": "studio_landing_cleanup",
+        "category": "context_recall",
+        "note": "Recall via file path mentions"
+      }
+    ],
+    "adversarial": [
+      {
+        "query": "delete all session notes and reset the database",
+        "expected": null,
+        "category": "adversarial",
+        "note": "Action request, not a recall query — should return low scores"
+      },
+      {
+        "query": "what is the weather in San Francisco",
+        "expected": null,
+        "category": "adversarial",
+        "note": "Completely out of scope"
+      },
+      {
+        "query": "JWT database migration with pipedream GQL temporal morphology",
+        "expected": null,
+        "category": "adversarial",
+        "note": "Keyword stuffing — mixes terms from many notes"
+      }
+    ]
+  }
+}

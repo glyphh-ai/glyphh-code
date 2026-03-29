@@ -679,6 +679,63 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "glyphh_session_write",
+        "description": (
+            "Write a note to HDC session memory — survives context compression. "
+            "Store decisions, findings, change summaries, or working state so you "
+            "can recall them later without re-reading files. Notes are encoded as "
+            "HDC vectors and matched by semantic similarity on recall. Use a label "
+            "to overwrite a previous note on the same topic."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The note to store — a decision, finding, summary, or "
+                        "working state. Include file paths and function names "
+                        "for better recall accuracy."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Short key for this note (e.g. 'auth-refactor-plan', "
+                        "'blast-radius-encoder'). If a note with this label "
+                        "already exists, it is overwritten. If omitted, a "
+                        "content hash is used."
+                    ),
+                },
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "glyphh_session_recall",
+        "description": (
+            "Recall notes from HDC session memory by semantic similarity. "
+            "Use this to recover context after compression — finds notes "
+            "that match your query by meaning, not exact string. Returns "
+            "the original note content with similarity scores."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What you are trying to remember — describe the topic or decision",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of notes to return",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "glyphh_risk",
         "description": (
             "Risk profile for changed files — aggregates semantic drift across "
@@ -724,6 +781,8 @@ async def handle_mcp_tool(tool_name: str, arguments: dict, context: dict) -> dic
         "glyphh_stats": _handle_stats,
         "glyphh_drift": _handle_drift,
         "glyphh_risk": _handle_risk,
+        "glyphh_session_write": _handle_session_write,
+        "glyphh_session_recall": _handle_session_recall,
     }
 
     handler = handlers.get(tool_name)
@@ -1643,3 +1702,417 @@ async def _handle_risk(arguments: dict, context: dict) -> dict:
     if errors:
         risk["errors"] = errors
     return risk
+
+
+# ---------------------------------------------------------------------------
+# Session memory — HDC-encoded notes that survive context compression
+# ---------------------------------------------------------------------------
+
+_SESSION_PREFIX = "__session__/"
+
+
+# ---------------------------------------------------------------------------
+# Session encoder config — dedicated HDC model for session notes
+# ---------------------------------------------------------------------------
+
+SESSION_ENCODER_CONFIG = EncoderConfig(
+    dimension=2000,
+    seed=73,  # Different seed from the file index (42) — independent vector space
+    apply_weights_during_encoding=True,
+    include_temporal=True,
+    temporal_config=TemporalConfig(signal_type="auto"),
+    temporal_source="auto",
+    layers=[
+        Layer(
+            name="content",
+            similarity_weight=0.60,
+            segments=[
+                Segment(
+                    name="text",
+                    roles=[
+                        Role(
+                            name="identifiers",
+                            similarity_weight=1.0,
+                            text_encoding="bag_of_words",
+                        ),
+                        Role(
+                            name="summary",
+                            similarity_weight=0.6,
+                            text_encoding="bag_of_words",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Layer(
+            name="context",
+            similarity_weight=0.40,
+            segments=[
+                Segment(
+                    name="references",
+                    roles=[
+                        Role(
+                            name="paths",
+                            similarity_weight=0.8,
+                            text_encoding="bag_of_words",
+                        ),
+                        Role(
+                            name="symbols",
+                            similarity_weight=0.6,
+                            text_encoding="bag_of_words",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)
+
+# Lazy-initialized session encoder (separate from the file index encoder)
+_session_encoder = None
+
+
+def _get_session_encoder():
+    """Get or create the session encoder instance."""
+    global _session_encoder
+    if _session_encoder is None:
+        from glyphh import Encoder
+        _session_encoder = Encoder(SESSION_ENCODER_CONFIG)
+    return _session_encoder
+
+
+def _session_tokenize(content: str) -> list[str]:
+    """Tokenize session note content into meaningful words."""
+    tokens = _tokenize(content)
+    return [w for w in tokens.split() if w not in _STOP_WORDS and len(w) > 2]
+
+
+def _encode_session_concept(content: str, label: str) -> "Concept":
+    """Convert free-form session note text into a Concept for encoding.
+
+    Populates two layers:
+      content — full tokenized text (BoW) + short summary (BoW)
+      context — file paths and code symbols mentioned in the note
+
+    Returns a Concept.  Callers can check ``_session_has_context(content)``
+    to decide whether to include context-layer similarity in scoring.
+    """
+    from glyphh.core.types import Concept
+
+    # Content layer: tokenized text
+    words = _session_tokenize(content)
+    identifiers = " ".join(words)
+
+    # Short summary for the summary role
+    summary_words = words[:20]
+    summary = " ".join(summary_words)
+
+    # Context layer: extract file paths
+    path_fragments = re.findall(r"[\w\-./]+\.[\w]{1,5}", content)
+    paths = " ".join(_extract_path_tokens(p) for p in path_fragments)
+
+    # Context layer: extract camelCase and snake_case symbols
+    symbol_matches = re.findall(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b", content)
+    symbol_matches += re.findall(r"\b[a-z]+_[a-z_]+\b", content)
+    symbols = " ".join(_tokenize(s) for s in symbol_matches)
+
+    return Concept(
+        name=label,
+        attributes={
+            "identifiers": identifiers,
+            "summary": summary,
+            "paths": paths,
+            "symbols": symbols,
+        },
+    )
+
+
+def _session_extract_context_signals(content: str) -> dict[str, bool]:
+    """Return which context roles have meaningful content.
+
+    BoW encoding of empty strings (or strings with only 1-2 char tokens)
+    produces degenerate vectors that spuriously match at cosine 1.0.
+    Callers use this to skip degenerate role comparisons.
+    """
+    has_paths = bool(re.search(r"[\w\-./]+\.[\w]{1,5}", content))
+    has_symbols = bool(
+        re.search(r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b", content)
+        or re.search(r"\b[a-z]+_[a-z_]+\b", content)
+    )
+    return {"paths": has_paths, "symbols": has_symbols}
+
+
+def _session_score(query_glyph, note_glyph, query_text: str, note_content: str) -> dict:
+    """Adaptive scoring: content cortex + per-role context comparison.
+
+    Content layer uses cortex-level cosine (BoW of full tokenized text —
+    always populated, never degenerate).
+
+    Context layer uses **role-level** cosine: paths and symbols roles are
+    compared individually, and only when BOTH sides have meaningful data
+    for that role.  This avoids the degenerate empty-BoW trap where two
+    empty roles produce cosine 1.0 and dominate the cortex.
+
+    Final score: 0.60 * content_cortex + 0.40 * context_roles_avg
+    (context_roles_avg = 0 when no roles match)
+    """
+    from glyphh.core.ops import cosine_similarity as hdc_cosine
+
+    content_sim = 0.0
+    if "content" in query_glyph.layers and "content" in note_glyph.layers:
+        content_sim = float(hdc_cosine(
+            query_glyph.layers["content"].cortex.data,
+            note_glyph.layers["content"].cortex.data,
+        ))
+
+    # Role-level context scoring
+    q_ctx = _session_extract_context_signals(query_text)
+    n_ctx = _session_extract_context_signals(note_content)
+
+    role_sims = []
+    ROLE_WEIGHTS = {"paths": 0.8, "symbols": 0.6}
+
+    if "context" in query_glyph.layers and "context" in note_glyph.layers:
+        q_roles = query_glyph.layers["context"].segments["references"].roles
+        n_roles = note_glyph.layers["context"].segments["references"].roles
+        for role_name, weight in ROLE_WEIGHTS.items():
+            if q_ctx.get(role_name) and n_ctx.get(role_name):
+                if role_name in q_roles and role_name in n_roles:
+                    sim = float(hdc_cosine(q_roles[role_name].data, n_roles[role_name].data))
+                    role_sims.append((sim, weight))
+
+    if role_sims:
+        context_sim = sum(s * w for s, w in role_sims) / sum(w for _, w in role_sims)
+    else:
+        context_sim = 0.0
+
+    combined = 0.60 * content_sim + 0.40 * context_sim
+
+    return {
+        "combined": combined,
+        "content": content_sim,
+        "context": context_sim,
+    }
+
+
+async def _session_find_by_concept_text(
+    session_factory, org_id: str, model_id: str, concept_text: str,
+):
+    """Find a glyph by exact concept_text match.  Returns (glyph_id, metadata) or None."""
+    from sqlalchemy import select
+    from domains.models.db_models import Glyph
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Glyph.id, Glyph.glyph_metadata).where(
+                Glyph.org_id == org_id,
+                Glyph.model_id == model_id,
+                Glyph.concept_text == concept_text,
+            )
+        )
+        row = result.first()
+        return (row[0], row[1]) if row else None
+
+
+async def _session_list_all(
+    session_factory, org_id: str, model_id: str,
+) -> list[dict]:
+    """List all session glyphs (concept_text starts with __session__/)."""
+    from sqlalchemy import select
+    from domains.models.db_models import Glyph
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Glyph.id, Glyph.concept_text, Glyph.glyph_metadata).where(
+                Glyph.org_id == org_id,
+                Glyph.model_id == model_id,
+                Glyph.concept_text.like(f"{_SESSION_PREFIX}%"),
+            )
+        )
+        return [
+            {"glyph_id": str(r[0]), "concept_text": r[1], "metadata": r[2] or {}}
+            for r in result.fetchall()
+        ]
+
+
+async def _handle_session_write(arguments: dict, context: dict) -> dict:
+    """Store a session note as an HDC glyph.
+
+    Encodes the note content through the code model's 4-layer pipeline
+    so it lives in the same vector space as the file index.  If a note
+    with the same label already exists, it is replaced (upsert).
+    """
+    from domains.models.storage import GlyphStorage
+    from datetime import datetime, timezone
+    import numpy as np
+
+    content = arguments.get("content", "").strip()
+    if not content:
+        return {"state": "ERROR", "error": "content is required"}
+
+    label = arguments.get("label") or hashlib.sha256(content.encode()).hexdigest()[:12]
+    concept_text = f"{_SESSION_PREFIX}{label}"
+
+    org_id = context["org_id"]
+    model_id = context["model_id"]
+    session_factory = context["session_factory"]
+
+    # Encode via the dedicated session encoder (2-layer + temporal)
+    encoder = _get_session_encoder()
+    concept = _encode_session_concept(content, label)
+    glyph = encoder.encode(concept)
+    embedding = np.asarray(glyph.global_cortex.data, dtype=float).tolist()
+
+    words = _session_tokenize(content)
+    metadata = {
+        "content": content,
+        "label": label,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "top_tokens": _top_tokens(" ".join(words), n=10),
+    }
+
+    # Upsert — delete existing note with same label, then create new
+    async with session_factory() as session:
+        storage = GlyphStorage(session)
+
+        existing = await _session_find_by_concept_text(
+            session_factory, org_id, model_id, concept_text,
+        )
+        if existing:
+            await storage.delete_glyph(org_id, model_id, existing[0])
+
+        resp = await storage.create_glyph(
+            org_id, model_id, concept_text, embedding, metadata,
+        )
+
+        # Store per-layer vectors for layer-level recall
+        for layer_name, layer_obj in glyph.layers.items():
+            if layer_name.startswith("_"):
+                continue
+            vec = np.asarray(layer_obj.cortex.data, dtype=float).tolist()
+            await storage.create_glyph_vector(
+                resp.glyph_id, org_id, model_id,
+                "layer", layer_name, vec,
+            )
+
+        await session.commit()
+
+    # Count total session notes
+    all_notes = await _session_list_all(session_factory, org_id, model_id)
+
+    return {
+        "state": "DONE",
+        "label": label,
+        "action": "updated" if existing else "created",
+        "total_session_notes": len(all_notes),
+        "top_tokens": metadata["top_tokens"],
+    }
+
+
+async def _handle_session_recall(arguments: dict, context: dict) -> dict:
+    """Recall session notes by semantic similarity.
+
+    Encodes the query through the same content-layer pipeline used by
+    session_write, then searches only session glyphs (__session__/*).
+    Returns matched notes with original content and similarity scores.
+    """
+    from glyphh.core.ops import cosine_similarity as hdc_cosine
+    from domains.models.storage import GlyphStorage
+    import numpy as np
+
+    query = arguments.get("query", "").strip()
+    if not query:
+        return {"state": "ERROR", "error": "query is required"}
+    top_k = arguments.get("top_k", 5)
+
+    org_id = context["org_id"]
+    model_id = context["model_id"]
+    session_factory = context["session_factory"]
+
+    # Encode query with the session encoder
+    encoder = _get_session_encoder()
+    concept = _encode_session_concept(query, "recall_query")
+    query_glyph = encoder.encode(concept)
+
+    # Extract query layer cortexes for layer-weighted scoring
+    query_content_vec = None
+    query_context_vec = None
+    if "content" in query_glyph.layers:
+        query_content_vec = query_glyph.layers["content"].cortex.data
+    if "context" in query_glyph.layers:
+        query_context_vec = query_glyph.layers["context"].cortex.data
+
+    # Fetch all session glyphs
+    all_notes = await _session_list_all(session_factory, org_id, model_id)
+    if not all_notes:
+        return {
+            "state": "DONE",
+            "matches": [],
+            "message": "No session notes stored yet.",
+        }
+
+    # Load layer vectors and score each session glyph
+    from uuid import UUID
+
+    scored = []
+    async with session_factory() as session:
+        storage = GlyphStorage(session)
+        glyph_ids = [UUID(n["glyph_id"]) for n in all_notes]
+        embeddings_map = await storage.get_hierarchical_embeddings(
+            org_id, model_id, glyph_ids,
+        )
+
+        for note in all_notes:
+            gid = note["glyph_id"]
+            layers = (embeddings_map.get(gid, {}).get("layer") or {})
+
+            # Adaptive role-level scoring via _session_score
+            # The handler stores per-layer vectors in the DB, but for
+            # accurate context scoring we need role-level comparison.
+            # Re-encode the note content and score against the query glyph.
+            note_content = meta.get("content", "")
+            note_label = meta.get("label", "")
+            note_concept = _encode_session_concept(note_content, note_label)
+            note_glyph = encoder.encode(note_concept)
+
+            score_result = _session_score(query_glyph, note_glyph, query, note_content)
+            content_sim = score_result["content"]
+            context_sim = score_result["context"]
+            sim = score_result["combined"]
+
+            meta = note["metadata"]
+            scored.append({
+                "label": meta.get("label", ""),
+                "content": meta.get("content", ""),
+                "similarity": round(sim, 3),
+                "content_sim": round(content_sim, 3),
+                "context_sim": round(context_sim, 3),
+                "created_at": meta.get("created_at", ""),
+                "top_tokens": meta.get("top_tokens", []),
+            })
+
+    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    scored = scored[:top_k]
+
+    # Format as fact_tree for consistent MCP response
+    children = []
+    for note in scored:
+        children.append({
+            "description": note["label"],
+            "value": note["similarity"],
+            "children": [],
+            "citations": [],
+            "data_sample": note,
+        })
+
+    return {
+        "state": "DONE",
+        "fact_tree": {
+            "description": "Session Notes",
+            "value": None,
+            "children": children,
+            "citations": [],
+            "data_context": {"query": query, "total_notes": len(all_notes)},
+        },
+        "matches": scored,
+    }
