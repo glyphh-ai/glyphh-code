@@ -52,9 +52,9 @@ def _get_org_id() -> str | None:
 
 
 def _get_token() -> str | None:
-    """Get auth token from CLI session."""
+    """Get auth token from CLI session (with auto-refresh if expired)."""
     session = _get_session()
-    # Per-endpoint token → runtime_token → access_token
+    # Per-endpoint token → runtime_token → CLI get_token (with refresh)
     runtime_tokens = session.get("runtime_tokens", {})
     if isinstance(runtime_tokens, dict):
         for token in runtime_tokens.values():
@@ -63,7 +63,12 @@ def _get_token() -> str | None:
     rt = session.get("runtime_token", "").strip()
     if rt:
         return rt
-    return session.get("access_token", "").strip() or None
+    # Fallback to Platform JWT via CLI auth (handles auto-refresh)
+    try:
+        from glyphh.cli.auth import get_token
+        return get_token()
+    except ImportError:
+        return session.get("access_token", "").strip() or None
 
 
 def _get_runtime_url() -> str:
